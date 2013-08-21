@@ -52,6 +52,7 @@ import Data.Word
 import System.IO.Unsafe  -- see [Note: CAS and pointer equality]
 import System.Mem.StableName
 import Text.Printf
+import Prelude hiding (lookup)
 
 -----------------------------------------------------------------------
 
@@ -116,6 +117,23 @@ newINode h1 b1 h2 b2 lev = do
     return (INode ref)
 
 
+lookup :: (Eq k, Hashable k) => k -> Map k v -> IO (Maybe v)
+lookup k m@(Map inode) =
+    let h = hash k in repeatUntilJust (ilookup h k 0 inode)
+
+ilookup :: (Eq k, Hashable k) => Hash -> k -> Level -> INode k v -> IO (Maybe (Maybe v))
+ilookup h k lev (INode ref) = do
+    cn@(CNode bmp arr) <- readIORef ref
+    let m = mask h lev
+        i = sparseIndex bmp m
+    if bmp .&. m == 0
+        then return $ Just Nothing
+        else case arr !! i of
+            I inode2 -> ilookup h k (nextLevel lev) inode2
+            S k2 v | k == k2   -> return $ Just (Just v)
+                   | otherwise -> return Nothing
+
+
 repeatUntilTrue :: Monad m => m Bool -> m ()
 repeatUntilTrue act = do
     success <- act
@@ -123,6 +141,14 @@ repeatUntilTrue act = do
         then return ()
         else repeatUntilTrue act
 {-# INLINE repeatUntilTrue #-}
+
+repeatUntilJust :: Monad m => m (Maybe a) -> m a
+repeatUntilJust act = do
+    res <- act
+    case res of
+        Just res -> return res
+        Nothing  -> repeatUntilJust act
+{-# INLINE repeatUntilJust #-}
 
 -----------------------------------------------------------------------
 
