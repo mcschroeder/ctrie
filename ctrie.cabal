@@ -15,6 +15,21 @@ build-type:          Simple
 cabal-version:       >=1.8
 
 library
-  -- exposed-modules:     
-  -- other-modules:       
-  build-depends:       base ==4.6.*
+  exposed-modules:   Control.Concurrent.Map
+  build-depends:
+      base ==4.6.*
+    , hashable ==1.2.*
+
+test-suite map-properties
+  hs-source-dirs:    tests
+  main-is:           MapProperties.hs
+  type:              exitcode-stdio-1.0
+
+  build-depends:
+      base
+    , QuickCheck ==2.5.*
+    , test-framework ==0.8.*
+    , test-framework-quickcheck2 ==0.3.*
+    , containers ==0.5.*
+    , hashable ==1.2.*
+    , ctrie

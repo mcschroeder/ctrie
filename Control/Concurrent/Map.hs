@@ -40,13 +40,20 @@
 -- TODO:
 -- unordered-containers uses 'reallyUnsafePtrEquality' so we might as well
 
-module Control.Concurrent.Map where
+module Control.Concurrent.Map
+    ( Map
+    , empty
+    , insert
+    , lookup
+    , fromList
+    ) where
 
 import Control.Applicative ((<$>))
 import Control.Monad
 import Data.Bits
 import Data.Hashable (Hashable)
 import qualified Data.Hashable as H
+import qualified Data.List as List
 import Data.IORef
 import Data.Word
 import System.IO.Unsafe  -- see [Note: CAS and pointer equality]
@@ -73,10 +80,14 @@ hash :: Hashable a => a -> Hash
 hash = fromIntegral . H.hash
 
 -----------------------------------------------------------------------
+-- * Construction
 
 empty :: IO (Map k v)
 empty = Map <$> INode <$> newIORef (CNode 0 [])
 
+
+-----------------------------------------------------------------------
+-- * Insertion
 
 insert :: (Eq k, Hashable k) => k -> v -> Map k v -> IO ()
 insert k v m@(Map inode) =
@@ -116,6 +127,17 @@ newINode h1 b1 h2 b2 lev = do
                  newIORef $ CNode bmp [I inode']
     return (INode ref)
 
+repeatUntilTrue :: Monad m => m Bool -> m ()
+repeatUntilTrue act = do
+    success <- act
+    if success
+        then return ()
+        else repeatUntilTrue act
+{-# INLINE repeatUntilTrue #-}
+
+
+-----------------------------------------------------------------------
+-- * Query
 
 lookup :: (Eq k, Hashable k) => k -> Map k v -> IO (Maybe v)
 lookup k m@(Map inode) = let h = hash k in ilookup h k 0 inode
@@ -133,13 +155,11 @@ ilookup h k lev (INode ref) = do
                    | otherwise -> return Nothing
 
 
-repeatUntilTrue :: Monad m => m Bool -> m ()
-repeatUntilTrue act = do
-    success <- act
-    if success
-        then return ()
-        else repeatUntilTrue act
-{-# INLINE repeatUntilTrue #-}
+-----------------------------------------------------------------------
+-- * Lists
+
+fromList :: (Eq k, Hashable k) => [(k,v)] -> IO (Map k v)
+fromList xs = empty >>= \m -> mapM_ (\(k,v) -> insert k v m) xs >> return m
 
 
 -----------------------------------------------------------------------

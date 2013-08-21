@@ -1,2 +1,4 @@
 *.hi
 *.o
+cabal-dev/
+dist/
