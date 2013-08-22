@@ -46,6 +46,7 @@ module Control.Concurrent.Map
     , insert
     , lookup
     , fromList
+    , unsafeToList
     ) where
 
 import Control.Applicative ((<$>))
@@ -161,6 +162,17 @@ ilookup h k lev (INode ref) = do
 fromList :: (Eq k, Hashable k) => [(k,v)] -> IO (Map k v)
 fromList xs = empty >>= \m -> mapM_ (\(k,v) -> insert k v m) xs >> return m
 
+-- NOTE: 'unsafeToList' has no atomicity guarantees (meaning concurrent
+-- changes to the map will lead to an inconsistent result) and probably
+-- atrocious performance. It only exists so we can test some stuff before
+-- proper snapshotting is implemented.
+unsafeToList :: Map k v -> IO [(k,v)]
+unsafeToList (Map inode) = go inode
+    where
+        go (INode ref) = readIORef ref >>= \(CNode bmp arr) -> go2 arr []
+        go2 [] xs = return xs
+        go2 ((I inode):arr) xs = go2 arr . (++ xs) =<< go inode
+        go2 ((S k v):arr) xs = go2 arr ((k,v):xs)
 
 -----------------------------------------------------------------------
 
