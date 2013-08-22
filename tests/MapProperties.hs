@@ -19,6 +19,7 @@ import Test.Framework.Providers.QuickCheck2 (testProperty)
 main = defaultMain [ testGroup "basic interface"
                         [ testProperty "lookup" pLookup
                         , testProperty "insert" pInsert
+                        , testProperty "remove" pRemove
                         ]
                      , testGroup "conversions"
                         [ testProperty "fromList" pFromList
@@ -62,6 +63,9 @@ pLookup k = M.lookup k `eq` CM.lookup k
 
 pInsert :: Key -> Int -> [(Key,Int)] -> Property
 pInsert k v = M.insert k v `eq_` CM.insert k v
+
+pRemove :: Key -> [(Key,Int)] -> Property
+pRemove k = M.delete k `eq_` CM.remove k
 
 pFromList :: [(Key,Int)] -> Property
 pFromList = id `eq_` (\_ -> return ())

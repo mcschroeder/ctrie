@@ -44,6 +44,7 @@ module Control.Concurrent.Map
     ( Map
     , empty
     , insert
+    , remove
     , lookup
     , fromList
     , unsafeToList
@@ -88,7 +89,7 @@ empty = Map <$> INode <$> newIORef (CNode 0 [])
 
 
 -----------------------------------------------------------------------
--- * Insertion
+-- * Modification
 
 insert :: (Eq k, Hashable k) => k -> v -> Map k v -> IO ()
 insert k v m@(Map inode) =
@@ -127,6 +128,28 @@ newINode h1 b1 h2 b2 lev = do
         EQ -> do inode' <- newINode h1 b1 h2 b2 (nextLevel lev)
                  newIORef $ CNode bmp [I inode']
     return (INode ref)
+
+
+remove :: (Eq k, Hashable k) => k -> Map k v -> IO ()
+remove k m@(Map inode) =
+    let h = hash k in repeatUntilTrue (iremove h k 0 inode)
+
+iremove :: (Eq k, Hashable k) => Hash -> k -> Level -> INode k v -> IO Bool
+iremove h k lev (INode ref) = do
+    cn@(CNode bmp arr) <- readIORef ref
+    let m = mask h lev
+        i = sparseIndex bmp m
+    if bmp .&. m == 0
+        then return True  -- not found
+        else case arr !! i of
+            I inode2 -> iremove h k (nextLevel lev) inode2
+            S k2 v2
+                | k == k2 -> do
+                    let arr' = arrayDelete i arr
+                        cn'  = CNode (bmp `xor` m) arr'
+                    compareAndSwap ref cn cn'
+                | otherwise -> return True  -- not found
+
 
 repeatUntilTrue :: Monad m => m Bool -> m ()
 repeatUntilTrue act = do
@@ -227,6 +250,9 @@ arrayUpdate :: a -> Int -> [a] -> [a]
 arrayUpdate x n xs = ys ++ [x] ++ zs
     where (ys,_:zs) = splitAt n xs
 
+arrayDelete :: Int -> [a] -> [a]
+arrayDelete n xs = ys ++ zs
+    where (ys,_:zs) = splitAt n xs
 
 -----------------------------------------------------------------------
 
