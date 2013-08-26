@@ -184,7 +184,7 @@ remove k (Map root) = go 0 undefined root
 -- * Query
 
 lookup :: (Eq k, Hashable k) => k -> Map k v -> IO (Maybe v)
-lookup k root@(Map inode) = go 0 undefined inode
+lookup k (Map root) = go 0 undefined root
     where
         h = hash k
         go lev parent inode@(INode ref) = do
@@ -201,7 +201,7 @@ lookup k root@(Map inode) = go 0 undefined inode
                                    | otherwise -> return Nothing
                 Tomb _ _ -> do
                     clean parent (prevLevel lev)
-                    go 0 undefined inode
+                    go 0 undefined root
 
 -----------------------------------------------------------------------
 
