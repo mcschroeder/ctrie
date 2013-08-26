@@ -75,6 +75,10 @@ data MainNode k v = CNode !Bitmap ![Branch k v]
 data Branch   k v = I !(INode k v)
                   | S !k v
 
+isTomb :: MainNode k v -> Bool
+isTomb (Tomb _ _) = True
+isTomb _          = False
+
 type Bitmap = Word
 type Hash   = Word
 type Level  = Int
@@ -93,36 +97,44 @@ empty = Map <$> INode <$> newIORef (CNode 0 [])
 -- * Modification
 
 insert :: (Eq k, Hashable k) => k -> v -> Map k v -> IO ()
-insert k v m@(Map inode) =
-    let h = hash k in repeatUntilTrue (iinsert h k v 0 inode undefined)
+insert k v (Map root) = go 0 undefined root
+    where
+        h = hash k
+        go lev parent inode@(INode ref) = do
+            main <- readIORef ref
+            case main of
+                cn@(CNode bmp arr) -> do
+                    let m = mask h lev
+                        i = sparseIndex bmp m
+                    if bmp .&. m == 0
+                        then insertTip ref cn i m
+                        else case arr !! i of
+                            I inode2 -> go (nextLevel lev) inode inode2
+                            S k2 v2 | k == k2 -> updateTip ref cn i
+                                    | otherwise -> extend ref cn i k2 v2 lev
+                Tomb _ _ -> do
+                    clean parent (prevLevel lev)
+                    go 0 undefined root
 
-iinsert :: (Eq k, Hashable k)
-        => Hash -> k -> v -> Level -> INode k v -> INode k v -> IO Bool
-iinsert h k v lev inode@(INode ref) parent = do
-    main <- readIORef ref
-    case main of
-        cn@(CNode bmp arr) -> do
-            let m = mask h lev
-                i = sparseIndex bmp m
-            if bmp .&. m == 0
-                then let arr' = arrayInsert (S k v) i arr
-                         cn'  = CNode (bmp .|. m) arr'
-                    in compareAndSwap ref cn cn'
-                else case arr !! i of
-                    I inode2 -> iinsert h k v (nextLevel lev) inode2 inode
-                    S k2 v2
-                        | k == k2 -> do
-                            let arr' = arrayUpdate (S k v) i arr
-                                cn'  = CNode bmp arr'
-                            compareAndSwap ref cn cn'
-                        | otherwise -> do
-                            inode2 <- newINode h (S k v) (hash k2) (S k2 v2) (nextLevel lev)
-                            let arr' = arrayUpdate (I inode2) i arr
-                                cn'  = CNode bmp arr'
-                            compareAndSwap ref cn cn'
-        Tomb _ _ -> do
-            clean parent (prevLevel lev)
-            return False
+        insertTip ref cn@(CNode bmp arr) i m = do
+            let arr' = arrayInsert (S k v) i arr
+                cn'  = CNode (bmp .|. m) arr'
+            ok <- compareAndSwap ref cn cn'
+            unless ok $ go 0 undefined root
+
+        updateTip ref cn@(CNode bmp arr) i = do
+            let arr' = arrayUpdate (S k v) i arr
+                cn'  = CNode bmp arr'
+            ok <- compareAndSwap ref cn cn'
+            unless ok $ go 0 undefined root
+
+        extend ref cn@(CNode bmp arr) i k2 v2 lev = do
+            inode2 <- newINode h (S k v) (hash k2) (S k2 v2) (nextLevel lev)
+            let arr' = arrayUpdate (I inode2) i arr
+                cn'  = CNode bmp arr'
+            ok <- compareAndSwap ref cn cn'
+            unless ok $ go 0 undefined root
+
 
 newINode :: Hash -> Branch k v -> Hash -> Branch k v -> Int -> IO (INode k v)
 newINode h1 b1 h2 b2 lev = do
@@ -138,89 +150,58 @@ newINode h1 b1 h2 b2 lev = do
 
 
 remove :: (Eq k, Hashable k) => k -> Map k v -> IO ()
-remove k m@(Map inode) =
-    let h = hash k in void $ repeatUntilJust (iremove h k 0 inode undefined)
+remove k (Map root) = go 0 undefined root
+    where
+        h = hash k
+        go lev parent inode@(INode ref) = do
+            main <- readIORef ref
+            case main of
+                cn@(CNode bmp arr) -> do
+                    let m = mask h lev
+                        i = sparseIndex bmp m
+                    if bmp .&. m == 0
+                        then return ()
+                        else case arr !! i of
+                            I inode2 -> go (nextLevel lev) inode inode2
+                            S k2 v | k == k2 -> removeTip ref cn i m lev parent inode
+                                   | otherwise -> return ()
 
-iremove :: (Eq k, Hashable k)
-        => Hash -> k -> Level -> INode k v -> INode k v -> IO (Maybe (Maybe v))
-iremove h k lev inode@(INode ref) parent = do
-    main <- readIORef ref
-    case main of
-        cn@(CNode bmp arr) -> do
-            let m = mask h lev
-                i = sparseIndex bmp m
-            if bmp .&. m == 0
-                then return $ Just Nothing
-                else do
-                    res <- case arr !! i of
-                        I inode2 -> iremove h k (nextLevel lev) inode2 inode
-                        S k2 v
-                            | k == k2 -> do
-                                let arr' = arrayDelete i arr
-                                    cn'  = CNode (bmp `xor` m) arr'
-                                    cn'' = contract cn' lev
-                                succ <- compareAndSwap ref cn cn''
-                                if succ
-                                    then return $ Just (Just v)
-                                    else return Nothing
-                            | otherwise -> return $ Just Nothing
-                    case res of
-                        Nothing -> return Nothing
-                        Just Nothing -> return $ Just Nothing
-                        Just (Just v) -> do
-                            main <- readIORef ref
-                            case main of
-                                Tomb _ _ -> do
-                                    cleanParent parent inode h (prevLevel lev)
-                                    return res
-                                _ -> return res
+                Tomb _ _ -> do
+                    clean parent (prevLevel lev)
+                    go 0 undefined root
 
-        Tomb _ _ -> do
-            clean parent (prevLevel lev)
-            return Nothing
-
-repeatUntilTrue :: Monad m => m Bool -> m ()
-repeatUntilTrue act = do
-    success <- act
-    if success
-        then return ()
-        else repeatUntilTrue act
-{-# INLINE repeatUntilTrue #-}
-
+        removeTip ref cn@(CNode bmp arr) i m lev parent inode = do
+            let arr' = arrayDelete i arr
+                cn'  = CNode (bmp `xor` m) arr'
+                cn'' = contract cn' lev
+            ok <- compareAndSwap ref cn cn'
+            unless ok $ go 0 undefined root
+            main <- readIORef ref
+            when (isTomb main) $
+                cleanParent parent inode h (prevLevel lev)
 
 -----------------------------------------------------------------------
 -- * Query
 
 lookup :: (Eq k, Hashable k) => k -> Map k v -> IO (Maybe v)
-lookup k m@(Map inode) =
-    let h = hash k in repeatUntilJust (ilookup h k 0 inode undefined)
-
-ilookup :: (Eq k, Hashable k)
-        => Hash -> k -> Level -> INode k v -> INode k v -> IO (Maybe (Maybe v))
-ilookup h k lev inode@(INode ref) parent = do
-    main <- readIORef ref
-    case main of
-        cn@(CNode bmp arr) -> do
-            let m = mask h lev
-                i = sparseIndex bmp m
-            if bmp .&. m == 0
-                then return $ Just Nothing
-                else case arr !! i of
-                    I inode2 -> ilookup h k (nextLevel lev) inode2 inode
-                    S k2 v | k == k2   -> return $ Just (Just v)
-                           | otherwise -> return $ Just Nothing
-        Tomb _ _ -> do
-            clean parent (prevLevel lev)
-            return Nothing
-
-
-repeatUntilJust :: Monad m => m (Maybe a) -> m a
-repeatUntilJust act = do
-    result <- act
-    case result of
-        Just a  -> return a
-        Nothing -> repeatUntilJust act
-{-# INLINE repeatUntilJust #-}
+lookup k root@(Map inode) = go 0 undefined inode
+    where
+        h = hash k
+        go lev parent inode@(INode ref) = do
+            main <- readIORef ref
+            case main of
+                cn@(CNode bmp arr) -> do
+                    let m = mask h lev
+                        i = sparseIndex bmp m
+                    if bmp .&. m == 0
+                        then return Nothing
+                        else case arr !! i of
+                            I inode2           -> go (nextLevel lev) inode inode2
+                            S k2 v | k == k2   -> return (Just v)
+                                   | otherwise -> return Nothing
+                Tomb _ _ -> do
+                    clean parent (prevLevel lev)
+                    go 0 undefined inode
 
 -----------------------------------------------------------------------
 
