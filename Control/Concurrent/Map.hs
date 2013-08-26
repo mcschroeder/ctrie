@@ -172,7 +172,7 @@ remove k (Map root) = go 0 undefined root
         removeTip parent inode cn@(CNode bmp arr) i m lev = do
             let arr' = arrayDelete i arr
                 cn'  = CNode (bmp `xor` m) arr'
-                cn'' = contract cn' lev
+                cn'' = contract lev cn'
             ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
             main <- readIORef inode
@@ -203,60 +203,50 @@ lookup k (Map root) = go 0 undefined root
                     go 0 undefined root
 
 -----------------------------------------------------------------------
+-- * Internal compression operations
 
 clean :: INode k v -> Level -> IO ()
 clean inode lev = do
     main <- readIORef inode
     case main of
         cn@(CNode _ _) -> do
-            cn' <- compress cn lev
-            compareAndSwap inode cn cn'
-            return ()
+            cn' <- compress lev cn
+            void $ compareAndSwap inode cn cn'
         _ -> return ()
-
-compress :: MainNode k v -> Level -> IO (MainNode k v)
-compress cn@(CNode bmp arr) lev = do
-    arr' <- mapM resurrect arr
-    let cn' = CNode bmp arr'
-    return $ contract cn' lev
-compress x _ = return x
-
-resurrect :: Branch k v -> IO (Branch k v)
-resurrect i@(I inode) = do
-    main <- readIORef inode
-    case main of
-        Tomb k v -> return (S k v)
-        _        -> return i
-resurrect s = return s
-
-contract :: MainNode k v -> Level -> MainNode k v
-contract cn@(CNode bmp [(S k v)]) lev | lev > 0 = Tomb k v
-contract x _ = x
 
 cleanParent :: INode k v -> INode k v -> Hash -> Level -> IO ()
 cleanParent parent inode h lev = do
-    main <- readIORef inode
     pmain <- readIORef parent
     case pmain of
         cn@(CNode bmp arr) -> do
             let m = mask h lev
                 i = sparseIndex bmp m
-            if bmp .&. m == 0
-                then return ()
-                else do
-                    let sub = arr !! i
-                    case sub of
-                        (I subi) -> if not $ ptrEq subi inode
-                            then return ()
-                            else case main of
-                                Tomb _ _ -> do
-                                    cn' <- compress cn lev
-                                    succ <- compareAndSwap parent cn cn'
-                                    if not succ
-                                        then cleanParent parent inode h lev
-                                        else return ()
-                        _ -> return ()
+            unless (bmp .&. m == 0) $
+                case arr !! i of
+                    I inode2 | inode2 == inode -> do
+                        main <- readIORef inode
+                        when (isTomb main) $ do
+                            cn' <- compress lev cn
+                            ok  <- compareAndSwap parent cn cn'
+                            unless ok $ cleanParent parent inode h lev
+                    _ -> return ()
         _ -> return ()
+
+compress :: Level -> MainNode k v -> IO (MainNode k v)
+compress lev (CNode bmp arr) = contract lev <$> CNode bmp <$> mapM resurrect arr
+compress _ x = return x
+
+resurrect :: Branch k v -> IO (Branch k v)
+resurrect b@(I inode) = do
+    main <- readIORef inode
+    case main of
+        Tomb k v -> return (S k v)
+        _        -> return b
+resurrect b = return b
+
+contract :: Level -> MainNode k v -> MainNode k v
+contract lev (CNode bmp [(S k v)]) | lev > 0 = Tomb k v
+contract _ x = x
 
 -----------------------------------------------------------------------
 -- * Lists
@@ -351,6 +341,3 @@ printMap (Map root) = goI root
         goM (Tomb k v) = putStr $ "(T " ++ (show k) ++ " " ++ (show v) ++ ")"
         goB (I i) = putStr "\n" >> goI i
         goB (S k v) = putStr $ "(" ++ (show k) ++ "," ++ (show v) ++ ")"
-
-
-
