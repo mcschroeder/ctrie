@@ -66,12 +66,12 @@ import Prelude hiding (lookup)
 -----------------------------------------------------------------------
 
 -- TODO: list of branches in CNode should be an O(1) array of course
--- TODO: deal with hash collisions
 
 newtype Map   k v = Map (INode k v)
 type    INode k v = IORef (MainNode k v)
 data MainNode k v = CNode !Bitmap ![Branch k v]
                   | Tomb !k v
+                  | Collision ![(k,v)]   -- TODO: SNode data type for strict key field
 data Branch   k v = I !(INode k v)
                   | S !k v
 
@@ -112,9 +112,12 @@ insert k v (Map root) = go 0 undefined root
                             I inode2 -> go (nextLevel lev) inode inode2
                             S k2 v2 | k == k2 -> updateTip inode cn i
                                     | otherwise -> extend inode cn i k2 v2 lev
+
                 Tomb _ _ -> do
                     clean parent (prevLevel lev)
                     go 0 undefined root
+
+                col@(Collision _) -> addToCollision inode col
 
         insertTip inode cn@(CNode bmp arr) i m = do
             let arr' = arrayInsert (S k v) i arr
@@ -129,23 +132,30 @@ insert k v (Map root) = go 0 undefined root
             unless ok $ go 0 undefined root
 
         extend inode cn@(CNode bmp arr) i k2 v2 lev = do
-            inode2 <- newINode h (S k v) (hash k2) (S k2 v2) (nextLevel lev)
+            inode2 <- newINode h k v (hash k2) k2 v2 (nextLevel lev)
             let arr' = arrayUpdate (I inode2) i arr
                 cn'  = CNode bmp arr'
             ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
 
+        addToCollision inode col@(Collision xs) = do
+            let col' = Collision ((k,v):xs)
+            ok <- compareAndSwap inode col col'
+            unless ok $ go 0 undefined root
 
-newINode :: Hash -> Branch k v -> Hash -> Branch k v -> Int -> IO (INode k v)
-newINode h1 b1 h2 b2 lev = do
-    let i1 = index h1 lev
-        i2 = index h2 lev
-        bmp = (unsafeShiftL 1 i1) .|. (unsafeShiftL 1 i2)
-    case compare i1 i2 of
-        LT -> newIORef $ CNode bmp [b1,b2]
-        GT -> newIORef $ CNode bmp [b2,b1]
-        EQ -> do inode' <- newINode h1 b1 h2 b2 (nextLevel lev)
-                 newIORef $ CNode bmp [I inode']
+
+newINode :: Hash -> k -> v -> Hash -> k -> v -> Int -> IO (INode k v)
+newINode h1 k1 v1 h2 k2 v2 lev
+    | lev >= hashLength = newIORef $ Collision [(k1,v1),(k2,v2)]
+    | otherwise = do
+        let i1 = index h1 lev
+            i2 = index h2 lev
+            bmp = (unsafeShiftL 1 i1) .|. (unsafeShiftL 1 i2)
+        case compare i1 i2 of
+            LT -> newIORef $ CNode bmp [S k1 v1, S k2 v2]
+            GT -> newIORef $ CNode bmp [S k2 v2, S k1 v1]
+            EQ -> do inode' <- newINode h1 k1 v1 h2 k2 v2 (nextLevel lev)
+                     newIORef $ CNode bmp [I inode']
 
 
 remove :: (Eq k, Hashable k) => k -> Map k v -> IO ()
@@ -169,6 +179,8 @@ remove k (Map root) = go 0 undefined root
                     clean parent (prevLevel lev)
                     go 0 undefined root
 
+                col@(Collision _) -> removeFromCollision inode col
+
         removeTip parent inode cn@(CNode bmp arr) i m lev = do
             let arr' = arrayDelete i arr
                 cn'  = CNode (bmp `xor` m) arr'
@@ -178,6 +190,15 @@ remove k (Map root) = go 0 undefined root
             main <- readIORef inode
             when (isTomb main) $
                 cleanParent parent inode h (prevLevel lev)
+
+        removeFromCollision inode col@(Collision xs) = do
+            let xs'  = filter ((/=) k . fst) xs
+                col' = if length xs' > 1
+                            then Collision xs'
+                            else let (k0,v0) = head xs'
+                                 in Tomb k0 v0
+            ok <- compareAndSwap inode col col'
+            unless ok $ go 0 undefined root
 
 -----------------------------------------------------------------------
 -- * Query
@@ -198,9 +219,12 @@ lookup k (Map root) = go 0 undefined root
                             I inode2           -> go (nextLevel lev) inode inode2
                             S k2 v | k == k2   -> return (Just v)
                                    | otherwise -> return Nothing
+
                 Tomb _ _ -> do
                     clean parent (prevLevel lev)
                     go 0 undefined root
+
+                Collision xs -> return $ List.lookup k xs
 
 -----------------------------------------------------------------------
 -- * Internal compression operations
@@ -261,7 +285,13 @@ fromList xs = empty >>= \m -> mapM_ (\(k,v) -> insert k v m) xs >> return m
 unsafeToList :: Map k v -> IO [(k,v)]
 unsafeToList (Map root) = go root
     where
-        go inode = readIORef inode >>= \(CNode bmp arr) -> go2 arr []
+        go inode = do
+            main <- readIORef inode
+            case main of
+                CNode _ arr -> go2 arr []
+                Tomb _ _ -> return []
+                Collision xs -> return xs
+
         go2 [] xs = return xs
         go2 ((I inode):arr) xs = go2 arr . (++ xs) =<< go inode
         go2 ((S k v):arr) xs = go2 arr ((k,v):xs)
@@ -283,8 +313,11 @@ ptrEq !x !y = unsafePerformIO $ do
 
 -----------------------------------------------------------------------
 
+hashLength :: Int
+hashLength = bitSize (undefined :: Word)
+
 bitsPerSubkey :: Int
-bitsPerSubkey = floor . logBase 2 . fromIntegral . bitSize $ (undefined :: Word)
+bitsPerSubkey = floor . logBase 2 . fromIntegral . bitSize $ hashLength
 
 subkeyMask :: Bitmap
 subkeyMask = 1 `unsafeShiftL` bitsPerSubkey - 1
@@ -327,6 +360,8 @@ arrayDelete :: Int -> [a] -> [a]
 arrayDelete n xs = ys ++ zs
     where (ys,_:zs) = splitAt n xs
 
+
+
 -----------------------------------------------------------------------
 
 -- TODO
@@ -339,5 +374,6 @@ printMap (Map root) = goI root
             mapM_ (\b -> goB b >> putStr ", ") arr
             putStr $ "] )"
         goM (Tomb k v) = putStr $ "(T " ++ (show k) ++ " " ++ (show v) ++ ")"
+        goM (Collision xs) = putStr $ "(Collision " ++ show xs ++ ")"
         goB (I i) = putStr "\n" >> goI i
         goB (S k v) = putStr $ "(" ++ (show k) ++ "," ++ (show v) ++ ")"

@@ -1,3 +1,5 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
 module Main where
 
 import Control.Applicative
@@ -54,7 +56,16 @@ unsafeToAscList m = do
 
 -----------------------------------------------------------------------
 
-type Key = Int
+-- key type that generates more hash collisions
+
+newtype Key = K { unK :: Int }
+    deriving (Arbitrary, Eq, Ord)
+
+instance Show Key where
+    show = show . unK
+
+instance Hashable Key where
+    hashWithSalt salt k = hashWithSalt salt (unK k) `mod` 20
 
 -----------------------------------------------------------------------
 
