@@ -117,7 +117,7 @@ insert k v (Map root) = go 0 undefined root
                     clean parent (prevLevel lev)
                     go 0 undefined root
 
-                col@(Collision _) -> addToCollision inode col
+                col@(Collision _) -> insertCollision inode col
 
         insertTip inode cn@(CNode bmp arr) i m = do
             let arr' = arrayInsert (S k v) i arr
@@ -138,8 +138,8 @@ insert k v (Map root) = go 0 undefined root
             ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
 
-        addToCollision inode col@(Collision xs) = do
-            let col' = Collision ((k,v):xs)
+        insertCollision inode col@(Collision xs) = do
+            let col' = Collision $ (k,v) : List.filter ((/=) k . fst) xs
             ok <- compareAndSwap inode col col'
             unless ok $ go 0 undefined root
 
