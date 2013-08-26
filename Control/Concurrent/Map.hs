@@ -289,7 +289,7 @@ unsafeToList (Map root) = go root
             main <- readIORef inode
             case main of
                 CNode _ arr -> go2 arr []
-                Tomb _ _ -> return []
+                Tomb k v -> return [(k,v)]
                 Collision xs -> return xs
 
         go2 [] xs = return xs
