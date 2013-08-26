@@ -19,6 +19,7 @@ library
   build-depends:
       base ==4.6.*
     , hashable ==1.2.*
+    , primitive ==0.5.*
 
 test-suite map-properties
   hs-source-dirs:    tests

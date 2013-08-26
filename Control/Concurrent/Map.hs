@@ -48,15 +48,20 @@ module Control.Concurrent.Map
     , lookup
     , fromList
     , unsafeToList
+    , printMap
     ) where
 
 import Control.Applicative ((<$>))
 import Control.Monad
+import Control.Monad.Primitive
+import Control.Monad.ST
 import Data.Bits
 import Data.Hashable (Hashable)
 import qualified Data.Hashable as H
-import qualified Data.List as List
 import Data.IORef
+import qualified Data.List as List
+import Data.Maybe
+import Data.Primitive.Array
 import Data.Word
 import System.IO.Unsafe  -- see [Note: CAS and pointer equality]
 import System.Mem.StableName
@@ -65,13 +70,12 @@ import Prelude hiding (lookup)
 
 -----------------------------------------------------------------------
 
--- TODO: list of branches in CNode should be an O(1) array of course
-
 newtype Map   k v = Map (INode k v)
 type    INode k v = IORef (MainNode k v)
-data MainNode k v = CNode !Bitmap ![Branch k v]
+data MainNode k v = CNode !Bitmap !(Array (Branch k v))
                   | Tomb !k v
-                  | Collision ![(k,v)]   -- TODO: SNode data type for strict key field
+                  | Collision ![(k,v)] -- !(Array (k,v)) ?
+                    -- TODO: SNode data type for strict key field
 data Branch   k v = I !(INode k v)
                   | S !k v
 
@@ -90,7 +94,7 @@ hash = fromIntegral . H.hash
 -- * Construction
 
 empty :: IO (Map k v)
-empty = Map <$> newIORef (CNode 0 [])
+empty = Map <$> newIORef (CNode 0 emptyArray)
 
 
 -----------------------------------------------------------------------
@@ -108,7 +112,7 @@ insert k v (Map root) = go 0 undefined root
                         i = sparseIndex bmp m
                     if bmp .&. m == 0
                         then insertTip inode cn i m
-                        else case arr !! i of
+                        else case indexArray arr i of
                             I inode2 -> go (nextLevel lev) inode inode2
                             S k2 v2 | k == k2 -> updateTip inode cn i
                                     | otherwise -> extend inode cn i k2 v2 lev
@@ -120,20 +124,20 @@ insert k v (Map root) = go 0 undefined root
                 col@(Collision _) -> insertCollision inode col
 
         insertTip inode cn@(CNode bmp arr) i m = do
-            let arr' = arrayInsert (S k v) i arr
+            let arr' = arrayInsert (S k v) i (popCount bmp) arr
                 cn'  = CNode (bmp .|. m) arr'
             ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
 
         updateTip inode cn@(CNode bmp arr) i = do
-            let arr' = arrayUpdate (S k v) i arr
+            let arr' = arrayUpdate (S k v) i (popCount bmp) arr
                 cn'  = CNode bmp arr'
             ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
 
         extend inode cn@(CNode bmp arr) i k2 v2 lev = do
             inode2 <- newINode h k v (hash k2) k2 v2 (nextLevel lev)
-            let arr' = arrayUpdate (I inode2) i arr
+            let arr' = arrayUpdate (I inode2) i (popCount bmp) arr
                 cn'  = CNode bmp arr'
             ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
@@ -152,10 +156,10 @@ newINode h1 k1 v1 h2 k2 v2 lev
             i2 = index h2 lev
             bmp = (unsafeShiftL 1 i1) .|. (unsafeShiftL 1 i2)
         case compare i1 i2 of
-            LT -> newIORef $ CNode bmp [S k1 v1, S k2 v2]
-            GT -> newIORef $ CNode bmp [S k2 v2, S k1 v1]
+            LT -> newIORef $ CNode bmp $ arrayPair (S k1 v1) (S k2 v2)
+            GT -> newIORef $ CNode bmp $ arrayPair (S k2 v2) (S k1 v1)
             EQ -> do inode' <- newINode h1 k1 v1 h2 k2 v2 (nextLevel lev)
-                     newIORef $ CNode bmp [I inode']
+                     newIORef $ CNode bmp $ singletonArray (I inode')
 
 
 remove :: (Eq k, Hashable k) => k -> Map k v -> IO ()
@@ -170,7 +174,7 @@ remove k (Map root) = go 0 undefined root
                         i = sparseIndex bmp m
                     if bmp .&. m == 0
                         then return ()
-                        else case arr !! i of
+                        else case indexArray arr i of
                             I inode2 -> go (nextLevel lev) inode inode2
                             S k2 v | k == k2 -> removeTip parent inode cn i m lev
                                    | otherwise -> return ()
@@ -179,10 +183,10 @@ remove k (Map root) = go 0 undefined root
                     clean parent (prevLevel lev)
                     go 0 undefined root
 
-                col@(Collision _) -> removeFromCollision inode col
+                col@(Collision _) -> removeCollision inode col
 
         removeTip parent inode cn@(CNode bmp arr) i m lev = do
-            let arr' = arrayDelete i arr
+            let arr' = arrayDelete i (popCount bmp) arr
                 cn'  = CNode (bmp `xor` m) arr'
                 cn'' = contract lev cn'
             ok <- compareAndSwap inode cn cn'
@@ -191,7 +195,7 @@ remove k (Map root) = go 0 undefined root
             when (isTomb main) $
                 cleanParent parent inode h (prevLevel lev)
 
-        removeFromCollision inode col@(Collision xs) = do
+        removeCollision inode col@(Collision xs) = do
             let xs'  = filter ((/=) k . fst) xs
                 col' = if length xs' > 1
                             then Collision xs'
@@ -215,7 +219,7 @@ lookup k (Map root) = go 0 undefined root
                         i = sparseIndex bmp m
                     if bmp .&. m == 0
                         then return Nothing
-                        else case arr !! i of
+                        else case indexArray arr i of
                             I inode2           -> go (nextLevel lev) inode inode2
                             S k2 v | k == k2   -> return (Just v)
                                    | otherwise -> return Nothing
@@ -246,7 +250,7 @@ cleanParent parent inode h lev = do
             let m = mask h lev
                 i = sparseIndex bmp m
             unless (bmp .&. m == 0) $
-                case arr !! i of
+                case indexArray arr i of
                     I inode2 | inode2 == inode -> do
                         main <- readIORef inode
                         when (isTomb main) $ do
@@ -257,7 +261,8 @@ cleanParent parent inode h lev = do
         _ -> return ()
 
 compress :: Level -> MainNode k v -> IO (MainNode k v)
-compress lev (CNode bmp arr) = contract lev <$> CNode bmp <$> mapM resurrect arr
+compress lev (CNode bmp arr) =
+    contract lev <$> CNode bmp <$> arrayMapM resurrect (popCount bmp) arr
 compress _ x = return x
 
 resurrect :: Branch k v -> IO (Branch k v)
@@ -269,7 +274,10 @@ resurrect b@(I inode) = do
 resurrect b = return b
 
 contract :: Level -> MainNode k v -> MainNode k v
-contract lev (CNode bmp [(S k v)]) | lev > 0 = Tomb k v
+contract lev (CNode bmp arr) | lev > 0
+                           , popCount bmp == 1
+                           , S k v <- arrayHead arr
+                           = Tomb k v
 contract _ x = x
 
 -----------------------------------------------------------------------
@@ -288,13 +296,12 @@ unsafeToList (Map root) = go root
         go inode = do
             main <- readIORef inode
             case main of
-                CNode _ arr -> go2 arr []
+                CNode bmp arr -> arrayFoldM' go2 [] (popCount bmp) arr
                 Tomb k v -> return [(k,v)]
                 Collision xs -> return xs
 
-        go2 [] xs = return xs
-        go2 ((I inode):arr) xs = go2 arr . (++ xs) =<< go inode
-        go2 ((S k v):arr) xs = go2 arr ((k,v):xs)
+        go2 xs (I inode) = go inode >>= \ys -> return (ys ++ xs)
+        go2 xs (S k v) = return $ (k,v) : xs
 
 -----------------------------------------------------------------------
 
@@ -347,20 +354,87 @@ prevLevel = subtract bitsPerSubkey
 
 -----------------------------------------------------------------------
 
--- TODO
-arrayInsert :: a -> Int -> [a] -> [a]
-arrayInsert x n xs = ys ++ [x] ++ zs
-    where (ys,zs) = splitAt n xs
+arrayInsert :: a -> Int -> Int -> Array a -> Array a
+arrayInsert x i n arr = runST $ do
+    marr <- newArray (n+1) (error "arrayInsert")
+    copyArray marr 0 arr 0 i
+    writeArray marr i x
+    copyArray marr (i+1) arr i (n-i)
+    unsafeFreezeArray marr
+{-# INLINE arrayInsert #-}
 
-arrayUpdate :: a -> Int -> [a] -> [a]
-arrayUpdate x n xs = ys ++ [x] ++ zs
-    where (ys,_:zs) = splitAt n xs
+arrayUpdate :: a -> Int -> Int -> Array a -> Array a
+arrayUpdate x i n arr = runST $ do
+    marr <- newArray n (error "arrayUpdate")
+    copyArray marr 0 arr 0 n
+    writeArray marr i x
+    unsafeFreezeArray marr
+{-# INLINE arrayUpdate #-}
 
-arrayDelete :: Int -> [a] -> [a]
-arrayDelete n xs = ys ++ zs
-    where (ys,_:zs) = splitAt n xs
+arrayDelete :: Int -> Int -> Array a -> Array a
+arrayDelete i n arr = runST $ do
+    marr <- newArray (n-1) (error "arrayDelete")
+    copyArray marr 0 arr 0 i
+    copyArray marr i arr (i+1) (n-(i+1))
+    unsafeFreezeArray marr
+{-# INLINE arrayDelete #-}
 
+arrayPair :: a -> a -> Array a
+arrayPair x y = runST $ do
+    marr <- newArray 2 (error "arrayPair")
+    writeArray marr 0 x
+    writeArray marr 1 y
+    unsafeFreezeArray marr
+{-# INLINE arrayPair #-}
 
+arrayMapM :: PrimMonad m => (a -> m b) -> Int -> Array a -> m (Array b)
+arrayMapM f n arr = do
+    marr <- newArray n (error "arrayMapM")
+    go arr marr 0 n
+    unsafeFreezeArray marr
+    where
+        go arr marr i n
+            | i >= n = return ()
+            | otherwise = do
+                x <- indexArrayM arr i
+                writeArray marr i =<< f x
+                go arr marr (i+1) n
+{-# INLINE arrayMapM #-}
+
+arrayMapM_ :: PrimMonad m => (a -> m b) -> Int -> Array a -> m ()
+arrayMapM_ f n arr = go arr 0 n
+    where
+        go arr i n
+            | i >= n = return ()
+            | otherwise = do
+                x <- indexArrayM arr i
+                _ <- f x
+                go arr (i+1) n
+{-# INLINE arrayMapM_ #-}
+
+arrayFoldM' :: PrimMonad m => (b -> a -> m b) -> b -> Int -> Array a -> m b
+arrayFoldM' f z0 n arr0 = go arr0 n 0 z0
+    where
+        go arr n i !z
+            | i >= n = return z
+            | otherwise = do
+                x <- indexArrayM arr i
+                go arr n (i+1) =<< f z x
+{-# INLINE arrayFoldM' #-}
+
+arrayHead :: Array a -> a
+arrayHead = flip indexArray 0
+{-# INLINE arrayHead #-}
+
+emptyArray :: Array a
+emptyArray = runST $ unsafeFreezeArray =<< newArray 0 (error "empty array")
+{-# INLINE emptyArray #-}
+
+singletonArray :: a -> Array a
+singletonArray x = runST $ do
+    marr <- newArray 1 x
+    unsafeFreezeArray marr
+{-# INLINE singletonArray #-}
 
 -----------------------------------------------------------------------
 
@@ -371,7 +445,7 @@ printMap (Map root) = goI root
         goI inode = putStr "(I " >> readIORef inode >>= goM >> putStr ")\n"
         goM (CNode bmp arr) = do
             putStr $ "(C " ++ (show bmp) ++ " ["
-            mapM_ (\b -> goB b >> putStr ", ") arr
+            arrayMapM_ (\b -> goB b >> putStr ", ") (popCount bmp) arr
             putStr $ "] )"
         goM (Tomb k v) = putStr $ "(T " ++ (show k) ++ " " ++ (show v) ++ ")"
         goM (Collision xs) = putStr $ "(Collision " ++ show xs ++ ")"
