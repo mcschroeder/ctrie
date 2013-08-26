@@ -69,7 +69,7 @@ import Prelude hiding (lookup)
 -- TODO: deal with hash collisions
 
 newtype Map   k v = Map (INode k v)
-newtype INode k v = INode (IORef (MainNode k v))
+type    INode k v = IORef (MainNode k v)
 data MainNode k v = CNode !Bitmap ![Branch k v]
                   | Tomb !k v
 data Branch   k v = I !(INode k v)
@@ -90,7 +90,7 @@ hash = fromIntegral . H.hash
 -- * Construction
 
 empty :: IO (Map k v)
-empty = Map <$> INode <$> newIORef (CNode 0 [])
+empty = Map <$> newIORef (CNode 0 [])
 
 
 -----------------------------------------------------------------------
@@ -100,39 +100,39 @@ insert :: (Eq k, Hashable k) => k -> v -> Map k v -> IO ()
 insert k v (Map root) = go 0 undefined root
     where
         h = hash k
-        go lev parent inode@(INode ref) = do
-            main <- readIORef ref
+        go lev parent inode = do
+            main <- readIORef inode
             case main of
                 cn@(CNode bmp arr) -> do
                     let m = mask h lev
                         i = sparseIndex bmp m
                     if bmp .&. m == 0
-                        then insertTip ref cn i m
+                        then insertTip inode cn i m
                         else case arr !! i of
                             I inode2 -> go (nextLevel lev) inode inode2
-                            S k2 v2 | k == k2 -> updateTip ref cn i
-                                    | otherwise -> extend ref cn i k2 v2 lev
+                            S k2 v2 | k == k2 -> updateTip inode cn i
+                                    | otherwise -> extend inode cn i k2 v2 lev
                 Tomb _ _ -> do
                     clean parent (prevLevel lev)
                     go 0 undefined root
 
-        insertTip ref cn@(CNode bmp arr) i m = do
+        insertTip inode cn@(CNode bmp arr) i m = do
             let arr' = arrayInsert (S k v) i arr
                 cn'  = CNode (bmp .|. m) arr'
-            ok <- compareAndSwap ref cn cn'
+            ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
 
-        updateTip ref cn@(CNode bmp arr) i = do
+        updateTip inode cn@(CNode bmp arr) i = do
             let arr' = arrayUpdate (S k v) i arr
                 cn'  = CNode bmp arr'
-            ok <- compareAndSwap ref cn cn'
+            ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
 
-        extend ref cn@(CNode bmp arr) i k2 v2 lev = do
+        extend inode cn@(CNode bmp arr) i k2 v2 lev = do
             inode2 <- newINode h (S k v) (hash k2) (S k2 v2) (nextLevel lev)
             let arr' = arrayUpdate (I inode2) i arr
                 cn'  = CNode bmp arr'
-            ok <- compareAndSwap ref cn cn'
+            ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
 
 
@@ -141,20 +141,19 @@ newINode h1 b1 h2 b2 lev = do
     let i1 = index h1 lev
         i2 = index h2 lev
         bmp = (unsafeShiftL 1 i1) .|. (unsafeShiftL 1 i2)
-    ref <- case compare i1 i2 of
+    case compare i1 i2 of
         LT -> newIORef $ CNode bmp [b1,b2]
         GT -> newIORef $ CNode bmp [b2,b1]
         EQ -> do inode' <- newINode h1 b1 h2 b2 (nextLevel lev)
                  newIORef $ CNode bmp [I inode']
-    return (INode ref)
 
 
 remove :: (Eq k, Hashable k) => k -> Map k v -> IO ()
 remove k (Map root) = go 0 undefined root
     where
         h = hash k
-        go lev parent inode@(INode ref) = do
-            main <- readIORef ref
+        go lev parent inode = do
+            main <- readIORef inode
             case main of
                 cn@(CNode bmp arr) -> do
                     let m = mask h lev
@@ -163,20 +162,20 @@ remove k (Map root) = go 0 undefined root
                         then return ()
                         else case arr !! i of
                             I inode2 -> go (nextLevel lev) inode inode2
-                            S k2 v | k == k2 -> removeTip ref cn i m lev parent inode
+                            S k2 v | k == k2 -> removeTip parent inode cn i m lev
                                    | otherwise -> return ()
 
                 Tomb _ _ -> do
                     clean parent (prevLevel lev)
                     go 0 undefined root
 
-        removeTip ref cn@(CNode bmp arr) i m lev parent inode = do
+        removeTip parent inode cn@(CNode bmp arr) i m lev = do
             let arr' = arrayDelete i arr
                 cn'  = CNode (bmp `xor` m) arr'
                 cn'' = contract cn' lev
-            ok <- compareAndSwap ref cn cn'
+            ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
-            main <- readIORef ref
+            main <- readIORef inode
             when (isTomb main) $
                 cleanParent parent inode h (prevLevel lev)
 
@@ -187,8 +186,8 @@ lookup :: (Eq k, Hashable k) => k -> Map k v -> IO (Maybe v)
 lookup k (Map root) = go 0 undefined root
     where
         h = hash k
-        go lev parent inode@(INode ref) = do
-            main <- readIORef ref
+        go lev parent inode = do
+            main <- readIORef inode
             case main of
                 cn@(CNode bmp arr) -> do
                     let m = mask h lev
@@ -206,12 +205,12 @@ lookup k (Map root) = go 0 undefined root
 -----------------------------------------------------------------------
 
 clean :: INode k v -> Level -> IO ()
-clean (INode ref) lev = do
-    main <- readIORef ref
+clean inode lev = do
+    main <- readIORef inode
     case main of
         cn@(CNode _ _) -> do
             cn' <- compress cn lev
-            compareAndSwap ref cn cn'
+            compareAndSwap inode cn cn'
             return ()
         _ -> return ()
 
@@ -223,8 +222,8 @@ compress cn@(CNode bmp arr) lev = do
 compress x _ = return x
 
 resurrect :: Branch k v -> IO (Branch k v)
-resurrect i@(I (INode ref)) = do
-    main <- readIORef ref
+resurrect i@(I inode) = do
+    main <- readIORef inode
     case main of
         Tomb k v -> return (S k v)
         _        -> return i
@@ -235,9 +234,9 @@ contract cn@(CNode bmp [(S k v)]) lev | lev > 0 = Tomb k v
 contract x _ = x
 
 cleanParent :: INode k v -> INode k v -> Hash -> Level -> IO ()
-cleanParent parent@(INode pref) inode@(INode ref) h lev = do
-    main <- readIORef ref
-    pmain <- readIORef pref
+cleanParent parent inode h lev = do
+    main <- readIORef inode
+    pmain <- readIORef parent
     case pmain of
         cn@(CNode bmp arr) -> do
             let m = mask h lev
@@ -252,7 +251,7 @@ cleanParent parent@(INode pref) inode@(INode ref) h lev = do
                             else case main of
                                 Tomb _ _ -> do
                                     cn' <- compress cn lev
-                                    succ <- compareAndSwap pref cn cn'
+                                    succ <- compareAndSwap parent cn cn'
                                     if not succ
                                         then cleanParent parent inode h lev
                                         else return ()
@@ -270,9 +269,9 @@ fromList xs = empty >>= \m -> mapM_ (\(k,v) -> insert k v m) xs >> return m
 -- atrocious performance. It only exists so we can test some stuff before
 -- proper snapshotting is implemented.
 unsafeToList :: Map k v -> IO [(k,v)]
-unsafeToList (Map inode) = go inode
+unsafeToList (Map root) = go root
     where
-        go (INode ref) = readIORef ref >>= \(CNode bmp arr) -> go2 arr []
+        go inode = readIORef inode >>= \(CNode bmp arr) -> go2 arr []
         go2 [] xs = return xs
         go2 ((I inode):arr) xs = go2 arr . (++ xs) =<< go inode
         go2 ((S k v):arr) xs = go2 arr ((k,v):xs)
@@ -342,9 +341,9 @@ arrayDelete n xs = ys ++ zs
 
 -- TODO
 printMap :: (Show k, Show v) => Map k v -> IO ()
-printMap (Map i) = goI i
+printMap (Map root) = goI root
     where
-        goI (INode ref) = putStr "(I " >> readIORef ref >>= goM >> putStr ")\n"
+        goI inode = putStr "(I " >> readIORef inode >>= goM >> putStr ")\n"
         goM (CNode bmp arr) = do
             putStr $ "(C " ++ (show bmp) ++ " ["
             mapM_ (\b -> goB b >> putStr ", ") arr
