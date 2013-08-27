@@ -34,3 +34,19 @@ test-suite map-properties
     , containers ==0.5.*
     , hashable ==1.2.*
     , ctrie
+
+benchmark sequential
+  hs-source-dirs:    benchmarks
+  main-is:           Sequential.hs
+  type:              exitcode-stdio-1.0
+
+  build-depends:
+      base
+    , hashable
+    , random
+    , transformers
+    , deepseq
+    , criterion
+    , containers
+    , unordered-containers
+    , ctrie
