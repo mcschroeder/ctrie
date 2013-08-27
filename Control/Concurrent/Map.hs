@@ -90,6 +90,7 @@ type Level  = Int
 hash :: Hashable a => a -> Hash
 hash = fromIntegral . H.hash
 
+
 -----------------------------------------------------------------------
 -- * Construction
 
@@ -128,12 +129,14 @@ insert k v (Map root) = go 0 undefined root
                 cn'  = CNode (bmp .|. m) arr'
             ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
+        {-# INLINE insertTip #-}
 
         updateTip inode cn@(CNode bmp arr) i = do
             let arr' = arrayUpdate (S k v) i (popCount bmp) arr
                 cn'  = CNode bmp arr'
             ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
+        {-# INLINE updateTip #-}
 
         extend inode cn@(CNode bmp arr) i k2 v2 lev = do
             inode2 <- newINode h k v (hash k2) k2 v2 (nextLevel lev)
@@ -141,12 +144,14 @@ insert k v (Map root) = go 0 undefined root
                 cn'  = CNode bmp arr'
             ok <- compareAndSwap inode cn cn'
             unless ok $ go 0 undefined root
+        {-# INLINE extend #-}
 
         insertCollision inode col@(Collision xs) = do
             let col' = Collision $ (k,v) : List.filter ((/=) k . fst) xs
             ok <- compareAndSwap inode col col'
             unless ok $ go 0 undefined root
-
+        {-# INLINE insertCollision #-}
+{-# INLINABLE insert #-}
 
 newINode :: Hash -> k -> v -> Hash -> k -> v -> Int -> IO (INode k v)
 newINode h1 k1 v1 h2 k2 v2 lev
@@ -194,6 +199,7 @@ delete k (Map root) = go 0 undefined root
             main <- readIORef inode
             when (isTomb main) $
                 cleanParent parent inode h (prevLevel lev)
+        {-# INLINE removeTip #-}
 
         removeCollision inode col@(Collision xs) = do
             let xs'  = filter ((/=) k . fst) xs
@@ -203,6 +209,8 @@ delete k (Map root) = go 0 undefined root
                                  in Tomb k0 v0
             ok <- compareAndSwap inode col col'
             unless ok $ go 0 undefined root
+        {-# INLINE removeCollision #-}
+{-# INLINABLE delete #-}
 
 -----------------------------------------------------------------------
 -- * Query
@@ -229,6 +237,7 @@ lookup k (Map root) = go 0 undefined root
                     go 0 undefined root
 
                 Collision xs -> return $ List.lookup k xs
+{-# INLINABLE lookup #-}
 
 -----------------------------------------------------------------------
 -- * Internal compression operations
@@ -241,6 +250,7 @@ clean inode lev = do
             cn' <- compress lev cn
             void $ compareAndSwap inode cn cn'
         _ -> return ()
+{-# INLINE clean #-}
 
 cleanParent :: INode k v -> INode k v -> Hash -> Level -> IO ()
 cleanParent parent inode h lev = do
@@ -264,6 +274,7 @@ compress :: Level -> MainNode k v -> IO (MainNode k v)
 compress lev (CNode bmp arr) =
     contract lev <$> CNode bmp <$> arrayMapM resurrect (popCount bmp) arr
 compress _ x = return x
+{-# INLINE compress #-}
 
 resurrect :: Branch k v -> IO (Branch k v)
 resurrect b@(I inode) = do
@@ -272,6 +283,7 @@ resurrect b@(I inode) = do
         Tomb k v -> return (S k v)
         _        -> return b
 resurrect b = return b
+{-# INLINE resurrect #-}
 
 contract :: Level -> MainNode k v -> MainNode k v
 contract lev (CNode bmp arr) | lev > 0
@@ -279,12 +291,14 @@ contract lev (CNode bmp arr) | lev > 0
                            , S k v <- arrayHead arr
                            = Tomb k v
 contract _ x = x
+{-# INLINE contract #-}
 
 -----------------------------------------------------------------------
 -- * Lists
 
 fromList :: (Eq k, Hashable k) => [(k,v)] -> IO (Map k v)
 fromList xs = empty >>= \m -> mapM_ (\(k,v) -> insert k v m) xs >> return m
+{-# INLINABLE fromList #-}
 
 -- NOTE: 'unsafeToList' has no atomicity guarantees (meaning concurrent
 -- changes to the map will lead to an inconsistent result) and probably
@@ -302,6 +316,7 @@ unsafeToList (Map root) = go root
 
         go2 xs (I inode) = go inode >>= \ys -> return (ys ++ xs)
         go2 xs (S k v) = return $ (k,v) : xs
+{-# INLINABLE unsafeToList #-}
 
 -----------------------------------------------------------------------
 
@@ -311,12 +326,14 @@ compareAndSwap ref old new =
     atomicModifyIORef' ref (\cur -> if cur `ptrEq` old
                                     then (new, True)
                                     else (cur, False))
+{-# INLINE compareAndSwap #-}
 
 ptrEq :: a -> a -> Bool
 ptrEq !x !y = unsafePerformIO $ do
     sn1 <- makeStableName x
     sn2 <- makeStableName y
     return $ sn1 == sn2
+{-# INLINE ptrEq #-}
 
 -----------------------------------------------------------------------
 
