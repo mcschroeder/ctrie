@@ -44,7 +44,7 @@ module Control.Concurrent.Map
     ( Map
     , empty
     , insert
-    , remove
+    , delete
     , lookup
     , fromList
     , unsafeToList
@@ -162,8 +162,8 @@ newINode h1 k1 v1 h2 k2 v2 lev
                      newIORef $ CNode bmp $ singletonArray (I inode')
 
 
-remove :: (Eq k, Hashable k) => k -> Map k v -> IO ()
-remove k (Map root) = go 0 undefined root
+delete :: (Eq k, Hashable k) => k -> Map k v -> IO ()
+delete k (Map root) = go 0 undefined root
     where
         h = hash k
         go lev parent inode = do
