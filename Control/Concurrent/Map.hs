@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE BangPatterns, PatternGuards #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 -----------------------------------------------------------------------
 --
