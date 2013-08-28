@@ -50,3 +50,25 @@ benchmark sequential
     , containers
     , unordered-containers
     , ctrie
+
+  ghc-options: -O2 -rtsopts
+
+benchmark concurrent
+  hs-source-dirs:    benchmarks
+  main-is:           Concurrent.hs
+  type:              exitcode-stdio-1.0  
+
+  build-depends:
+      base
+    , async
+    , hashable
+    , random
+    , random-shuffle
+    , transformers
+    , deepseq
+    , criterion
+    , containers
+    , unordered-containers
+    , ctrie
+
+  ghc-options: -O2 -rtsopts -threaded
