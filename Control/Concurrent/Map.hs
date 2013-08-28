@@ -102,55 +102,46 @@ empty = Map <$> newIORef (CNode 0 emptyArray)
 -- * Modification
 
 insert :: (Eq k, Hashable k) => k -> v -> Map k v -> IO ()
-insert k v (Map root) = go 0 undefined root
+insert k v (Map root) = go0
     where
         h = hash k
+        go0 = go 0 undefined root
         go lev parent inode = do
             main <- readIORef inode
             case main of
                 cn@(CNode bmp arr) -> do
                     let m = mask h lev
                         i = sparseIndex bmp m
+                        n = popCount bmp
                     if bmp .&. m == 0
-                        then insertTip inode cn i m
+                        then do
+                            let arr' = arrayInsert (S k v) i n arr
+                                cn'  = CNode (bmp .|. m) arr'
+                            unlessM (compareAndSwap inode cn cn') go0
+
                         else case indexArray arr i of
+                            S k2 v2
+                                | k == k2 -> do
+                                    let arr' = arrayUpdate (S k v) i n arr
+                                        cn'  = CNode bmp arr'
+                                    unlessM (compareAndSwap inode cn cn') go0
+
+                                | otherwise -> do
+                                    let h2 = hash k2
+                                    inode2 <- newINode h k v h2 k2 v2 (nextLevel lev)
+                                    let arr' = arrayUpdate (I inode2) i n arr
+                                        cn'  = CNode bmp arr'
+                                    unlessM (compareAndSwap inode cn cn') go0
+
                             I inode2 -> go (nextLevel lev) inode inode2
-                            S k2 v2 | k == k2 -> updateTip inode cn i
-                                    | otherwise -> extend inode cn i k2 v2 lev
 
-                Tomb _ _ -> do
-                    clean parent (prevLevel lev)
-                    go 0 undefined root
+                Tomb _ _ -> clean parent (prevLevel lev) >> go0
 
-                col@(Collision _) -> insertCollision inode col
+                col@(Collision arr) -> do
+                    let arr' = (k,v) : List.filter ((/=) k . fst) arr
+                        col' = Collision arr'
+                    unlessM (compareAndSwap inode col col') go0
 
-        insertTip inode cn@(CNode bmp arr) i m = do
-            let arr' = arrayInsert (S k v) i (popCount bmp) arr
-                cn'  = CNode (bmp .|. m) arr'
-            ok <- compareAndSwap inode cn cn'
-            unless ok $ go 0 undefined root
-        {-# INLINE insertTip #-}
-
-        updateTip inode cn@(CNode bmp arr) i = do
-            let arr' = arrayUpdate (S k v) i (popCount bmp) arr
-                cn'  = CNode bmp arr'
-            ok <- compareAndSwap inode cn cn'
-            unless ok $ go 0 undefined root
-        {-# INLINE updateTip #-}
-
-        extend inode cn@(CNode bmp arr) i k2 v2 lev = do
-            inode2 <- newINode h k v (hash k2) k2 v2 (nextLevel lev)
-            let arr' = arrayUpdate (I inode2) i (popCount bmp) arr
-                cn'  = CNode bmp arr'
-            ok <- compareAndSwap inode cn cn'
-            unless ok $ go 0 undefined root
-        {-# INLINE extend #-}
-
-        insertCollision inode col@(Collision xs) = do
-            let col' = Collision $ (k,v) : List.filter ((/=) k . fst) xs
-            ok <- compareAndSwap inode col col'
-            unless ok $ go 0 undefined root
-        {-# INLINE insertCollision #-}
 {-# INLINABLE insert #-}
 
 newINode :: Hash -> k -> v -> Hash -> k -> v -> Int -> IO (INode k v)
@@ -168,9 +159,10 @@ newINode h1 k1 v1 h2 k2 v2 lev
 
 
 delete :: (Eq k, Hashable k) => k -> Map k v -> IO ()
-delete k (Map root) = go 0 undefined root
+delete k (Map root) = go0
     where
         h = hash k
+        go0 = go 0 undefined root
         go lev parent inode = do
             main <- readIORef inode
             case main of
@@ -178,47 +170,39 @@ delete k (Map root) = go 0 undefined root
                     let m = mask h lev
                         i = sparseIndex bmp m
                     if bmp .&. m == 0
-                        then return ()
+                        then return ()  -- not found
                         else case indexArray arr i of
+                            S k2 _
+                                | k == k2 -> do
+                                    let arr' = arrayDelete i (popCount bmp) arr
+                                        cn'  = CNode (bmp `xor` m) arr'
+                                        cn'' = contract lev cn'
+                                    unlessM (compareAndSwap inode cn cn') go0
+                                    whenM (isTomb <$> readIORef inode) $
+                                        cleanParent parent inode h (prevLevel lev)
+
+                                | otherwise -> return ()  -- not found
+
                             I inode2 -> go (nextLevel lev) inode inode2
-                            S k2 v | k == k2 -> removeTip parent inode cn i m lev
-                                   | otherwise -> return ()
 
-                Tomb _ _ -> do
-                    clean parent (prevLevel lev)
-                    go 0 undefined root
+                Tomb _ _ -> clean parent (prevLevel lev) >> go0
 
-                col@(Collision _) -> removeCollision inode col
+                col@(Collision arr) -> do
+                    let arr' = filter ((/=) k . fst) arr
+                        col' | [(k0,v0)] <- arr' = Tomb k0 v0
+                             | otherwise         = Collision arr'
+                    unlessM (compareAndSwap inode col col') go0
 
-        removeTip parent inode cn@(CNode bmp arr) i m lev = do
-            let arr' = arrayDelete i (popCount bmp) arr
-                cn'  = CNode (bmp `xor` m) arr'
-                cn'' = contract lev cn'
-            ok <- compareAndSwap inode cn cn'
-            unless ok $ go 0 undefined root
-            main <- readIORef inode
-            when (isTomb main) $
-                cleanParent parent inode h (prevLevel lev)
-        {-# INLINE removeTip #-}
-
-        removeCollision inode col@(Collision xs) = do
-            let xs'  = filter ((/=) k . fst) xs
-                col' = if length xs' > 1
-                            then Collision xs'
-                            else let (k0,v0) = head xs'
-                                 in Tomb k0 v0
-            ok <- compareAndSwap inode col col'
-            unless ok $ go 0 undefined root
-        {-# INLINE removeCollision #-}
 {-# INLINABLE delete #-}
 
 -----------------------------------------------------------------------
 -- * Query
 
 lookup :: (Eq k, Hashable k) => k -> Map k v -> IO (Maybe v)
-lookup k (Map root) = go 0 undefined root
+lookup k (Map root) = go0
     where
         h = hash k
+        go0 = go 0 undefined root
         go lev parent inode = do
             main <- readIORef inode
             case main of
@@ -232,11 +216,10 @@ lookup k (Map root) = go 0 undefined root
                             S k2 v | k == k2   -> return (Just v)
                                    | otherwise -> return Nothing
 
-                Tomb _ _ -> do
-                    clean parent (prevLevel lev)
-                    go 0 undefined root
+                Tomb _ _ -> clean parent (prevLevel lev) >> go0
 
                 Collision xs -> return $ List.lookup k xs
+
 {-# INLINABLE lookup #-}
 
 -----------------------------------------------------------------------
@@ -261,12 +244,11 @@ cleanParent parent inode h lev = do
                 i = sparseIndex bmp m
             unless (bmp .&. m == 0) $
                 case indexArray arr i of
-                    I inode2 | inode2 == inode -> do
-                        main <- readIORef inode
-                        when (isTomb main) $ do
+                    I inode2 | inode2 == inode ->
+                        whenM (isTomb <$> readIORef inode) $ do
                             cn' <- compress lev cn
-                            ok  <- compareAndSwap parent cn cn'
-                            unless ok $ cleanParent parent inode h lev
+                            unlessM (compareAndSwap parent cn cn') $
+                                cleanParent parent inode h lev
                     _ -> return ()
         _ -> return ()
 
@@ -334,6 +316,15 @@ ptrEq !x !y = unsafePerformIO $ do
     sn2 <- makeStableName y
     return $ sn1 == sn2
 {-# INLINE ptrEq #-}
+
+
+whenM :: Monad m => m Bool -> m () -> m ()
+whenM p s = p >>= \t -> if t then s else return ()
+{-# INLINE whenM #-}
+
+unlessM :: Monad m => m Bool -> m () -> m ()
+unlessM p s = p >>= \t -> if t then return () else s
+{-# INLINE unlessM #-}
 
 -----------------------------------------------------------------------
 
