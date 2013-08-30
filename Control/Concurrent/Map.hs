@@ -187,7 +187,7 @@ delete k (Map root) = go0
                                     let arr' = A.delete i (popCount bmp) arr
                                         cn'  = CNode (bmp `xor` m) arr'
                                         cn'' = contract lev cn'
-                                    unlessM (compareAndSwap inode cn cn') go0
+                                    unlessM (compareAndSwap inode cn cn'') go0
                                     whenM (isTomb <$> readIORef inode) $
                                         cleanParent parent inode h (prevLevel lev)
 
