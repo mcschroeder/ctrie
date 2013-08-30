@@ -63,7 +63,6 @@ import qualified Data.List as List
 import Data.Maybe
 import Data.Word
 import GHC.Exts ((==#), reallyUnsafePtrEquality#)
-import Text.Printf
 import Prelude hiding (lookup)
 
 import qualified Control.Concurrent.Map.Array as A
