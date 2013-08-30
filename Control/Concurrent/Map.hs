@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, PatternGuards #-}
+{-# LANGUAGE BangPatterns, PatternGuards, MagicHash #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 -----------------------------------------------------------------------
 --
@@ -15,30 +15,18 @@
 
 -- [Note: CAS and pointer equality]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
--- For the atomic compare-and-swap operation at the heart of this whole
--- thing, we need to compare two CNode objects. We can't really do an
--- actual '==' comparison, as that would entail a traversal of the whole
--- subtree. We could add a 'Unique' to the CNode and compare on that,
--- but we don't want the additional space overhead. That leaves us only
--- one option: pointer equality.
+-- For the atomic compare-and-swap, we need to be able to compare two
+-- CNode objects. We can't do an actual '==' comparison, as that would
+-- entail traversing the whole subtree. We could add a 'Unique' to the
+-- CNode and compare on that, but we don't want the overhead.
 --
--- Pointer equality is a tricky subject in Haskell. There's the GHC
--- primitive 'reallyUnsafePtrEquality#' which as you can guess is
--- probably not such a good idea to use: it can return both false negatives
--- and false positives. (Although some people on the internet argue that
--- false positives can not actually occur, I don't want to take that chance.)
+-- The only remaining option is pointer equality. The "proper" way would
+-- be to use 'StableName' (although we'd need 'unsafePerformIO' to use it
+-- inside 'atomicModifyIORef') but GHC's 'reallyUnsafePtrEquality#' is
+-- more than twice as fast and, despite the scary name, seems to be
+-- perfectly safe to use (unordered-containers uses it, for example).
 --
--- The alternative is 'StableName', which can have false negatives but not
--- false positives. And we don't actually care about false negatives, as then
--- the CAS will simply fail and the operation will be retried.
---
--- So 'StableName' seems like the winner, right? Well, there's just one
--- little snag: 'makeStableName' is in IO, so we can't use it inside
--- 'atomicModifyIORef' which takes a pure function. But you know what?
--- That's why we have 'unsafePerformIO'! *ducks*
---
--- TODO:
--- unordered-containers uses 'reallyUnsafePtrEquality' so we might as well
+-- If portability is a concern, we can always #ifdef the relevant section.
 
 module Control.Concurrent.Map
     ( Map
@@ -63,8 +51,7 @@ import qualified Data.List as List
 import Data.Maybe
 import Data.Primitive.Array
 import Data.Word
-import System.IO.Unsafe  -- see [Note: CAS and pointer equality]
-import System.Mem.StableName
+import GHC.Exts ((==#), reallyUnsafePtrEquality#)
 import Text.Printf
 import Prelude hiding (lookup)
 
@@ -311,10 +298,7 @@ compareAndSwap ref old new =
 {-# INLINE compareAndSwap #-}
 
 ptrEq :: a -> a -> Bool
-ptrEq !x !y = unsafePerformIO $ do
-    sn1 <- makeStableName x
-    sn2 <- makeStableName y
-    return $ sn1 == sn2
+ptrEq !x !y = reallyUnsafePtrEquality# x y ==# 1#
 {-# INLINE ptrEq #-}
 
 
