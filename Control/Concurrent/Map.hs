@@ -230,7 +230,9 @@ lookup k (Map root) = go0
                 Tomb _ -> clean parent (prevLevel lev) >> go0
 
                 Collision xs -> do
-                    return $ List.lookup k $ map (\(S k v) -> (k,v)) xs
+                    case List.find (\(S k2 _) -> k2 == k) xs of
+                        Just (S _ v) -> return (Just v)
+                        _            -> return Nothing
 
 {-# INLINABLE lookup #-}
 
