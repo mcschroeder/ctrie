@@ -16,6 +16,7 @@ cabal-version:       >=1.8
 
 library
   exposed-modules:   Control.Concurrent.Map
+  other-modules:     Control.Concurrent.Map.Array
   build-depends:
       base ==4.6.*
     , hashable ==1.2.*
