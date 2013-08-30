@@ -217,7 +217,7 @@ lookup k (Map root) = go0
         go lev parent inode = do
             main <- readIORef inode
             case main of
-                cn@(CNode bmp arr) -> do
+                CNode bmp arr -> do
                     let m = mask h lev
                         i = sparseIndex bmp m
                     if bmp .&. m == 0
