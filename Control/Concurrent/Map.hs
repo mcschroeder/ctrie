@@ -344,7 +344,7 @@ hashLength :: Int
 hashLength = bitSize (undefined :: Word)
 
 bitsPerSubkey :: Int
-bitsPerSubkey = floor . logBase 2 . fromIntegral . bitSize $ hashLength
+bitsPerSubkey = floor . logBase (2 :: Float) . fromIntegral $ hashLength
 
 subkeyMask :: Bitmap
 subkeyMask = 1 `unsafeShiftL` bitsPerSubkey - 1
