@@ -8,6 +8,7 @@ license:             MIT
 license-file:        LICENSE
 author:              Michael Schröder
 maintainer:          mcschroeder@gmail.com
+bug-reports:         https://github.com/mcschroeder/ctrie/issues
 copyright:           (c) 2013 Michael Schröder
 category:            Concurrency, Data Structures
 build-type:          Simple
@@ -74,3 +75,7 @@ benchmark concurrent
     , ctrie
 
   ghc-options: -O2 -rtsopts -threaded
+
+source-repository head
+  type:     git
+  location: https://github.com/mcschroeder/ctrie.git
