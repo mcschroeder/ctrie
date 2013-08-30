@@ -21,6 +21,8 @@ library
     , hashable ==1.2.*
     , primitive ==0.5.*
 
+  ghc-options: -Wall
+
 test-suite map-properties
   hs-source-dirs:    tests
   main-is:           MapProperties.hs
