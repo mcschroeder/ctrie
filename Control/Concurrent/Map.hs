@@ -59,15 +59,18 @@ import qualified Control.Concurrent.Map.Array as A
 newtype Map   k v = Map (INode k v)
 type    INode k v = IORef (MainNode k v)
 data MainNode k v = CNode !Bitmap !(A.Array (Branch k v))
-                  | Tomb !k v
-                  | Collision ![(k,v)] -- !(Array (k,v)) ?
-                    -- TODO: SNode data type for strict key field
+                  | Tomb !(SNode k v)
+                  | Collision ![SNode k v]
 data Branch   k v = I !(INode k v)
-                  | S !k v
+                  | SNode !(SNode k v)
+
+data SNode k v = S !k v
+    deriving (Eq, Show)
+
 
 isTomb :: MainNode k v -> Bool
-isTomb (Tomb _ _) = True
-isTomb _          = False
+isTomb (Tomb _) = True
+isTomb _        = False
 
 type Bitmap = Word
 type Hash   = Word
@@ -101,14 +104,14 @@ insert k v (Map root) = go0
                         n = popCount bmp
                     if bmp .&. m == 0
                         then do
-                            let arr' = A.insert (S k v) i n arr
+                            let arr' = A.insert (SNode (S k v)) i n arr
                                 cn'  = CNode (bmp .|. m) arr'
                             unlessM (compareAndSwap inode cn cn') go0
 
                         else case A.index arr i of
-                            S k2 v2
+                            SNode (S k2 v2)
                                 | k == k2 -> do
-                                    let arr' = A.update (S k v) i n arr
+                                    let arr' = A.update (SNode (S k v)) i n arr
                                         cn'  = CNode bmp arr'
                                     unlessM (compareAndSwap inode cn cn') go0
 
@@ -121,10 +124,10 @@ insert k v (Map root) = go0
 
                             I inode2 -> go (nextLevel lev) inode inode2
 
-                Tomb _ _ -> clean parent (prevLevel lev) >> go0
+                Tomb _ -> clean parent (prevLevel lev) >> go0
 
                 col@(Collision arr) -> do
-                    let arr' = (k,v) : List.filter ((/=) k . fst) arr
+                    let arr' = S k v : filter (\(S k2 _) -> k2 /= k) arr
                         col' = Collision arr'
                     unlessM (compareAndSwap inode col col') go0
 
@@ -132,14 +135,14 @@ insert k v (Map root) = go0
 
 newINode :: Hash -> k -> v -> Hash -> k -> v -> Int -> IO (INode k v)
 newINode h1 k1 v1 h2 k2 v2 lev
-    | lev >= hashLength = newIORef $ Collision [(k1,v1),(k2,v2)]
+    | lev >= hashLength = newIORef $ Collision [S k1 v1, S k2 v2]
     | otherwise = do
         let i1 = index h1 lev
             i2 = index h2 lev
             bmp = (unsafeShiftL 1 i1) .|. (unsafeShiftL 1 i2)
         case compare i1 i2 of
-            LT -> newIORef $ CNode bmp $ A.pair (S k1 v1) (S k2 v2)
-            GT -> newIORef $ CNode bmp $ A.pair (S k2 v2) (S k1 v1)
+            LT -> newIORef $ CNode bmp $ A.pair (SNode (S k1 v1)) (SNode (S k2 v2))
+            GT -> newIORef $ CNode bmp $ A.pair (SNode (S k2 v2)) (SNode (S k1 v1))
             EQ -> do inode' <- newINode h1 k1 v1 h2 k2 v2 (nextLevel lev)
                      newIORef $ CNode bmp $ A.singleton (I inode')
 
@@ -158,7 +161,7 @@ delete k (Map root) = go0
                     if bmp .&. m == 0
                         then return ()  -- not found
                         else case A.index arr i of
-                            S k2 _
+                            SNode (S k2 _)
                                 | k == k2 -> do
                                     let arr' = A.delete i (popCount bmp) arr
                                         cn'  = CNode (bmp `xor` m) arr'
@@ -171,12 +174,12 @@ delete k (Map root) = go0
 
                             I inode2 -> go (nextLevel lev) inode inode2
 
-                Tomb _ _ -> clean parent (prevLevel lev) >> go0
+                Tomb _ -> clean parent (prevLevel lev) >> go0
 
                 col@(Collision arr) -> do
-                    let arr' = filter ((/=) k . fst) arr
-                        col' | [(k0,v0)] <- arr' = Tomb k0 v0
-                             | otherwise         = Collision arr'
+                    let arr' = filter (\(S k2 _) -> k2 /= k) $ arr
+                        col' | [s] <- arr' = Tomb s
+                             | otherwise   = Collision arr'
                     unlessM (compareAndSwap inode col col') go0
 
 {-# INLINABLE delete #-}
@@ -198,13 +201,14 @@ lookup k (Map root) = go0
                     if bmp .&. m == 0
                         then return Nothing
                         else case A.index arr i of
-                            I inode2           -> go (nextLevel lev) inode inode2
-                            S k2 v | k == k2   -> return (Just v)
-                                   | otherwise -> return Nothing
+                            I inode2 -> go (nextLevel lev) inode inode2
+                            SNode (S k2 v) | k == k2   -> return (Just v)
+                                           | otherwise -> return Nothing
 
-                Tomb _ _ -> clean parent (prevLevel lev) >> go0
+                Tomb _ -> clean parent (prevLevel lev) >> go0
 
-                Collision xs -> return $ List.lookup k xs
+                Collision xs -> do
+                    return $ List.lookup k $ map (\(S k v) -> (k,v)) xs
 
 {-# INLINABLE lookup #-}
 
@@ -248,16 +252,16 @@ resurrect :: Branch k v -> IO (Branch k v)
 resurrect b@(I inode) = do
     main <- readIORef inode
     case main of
-        Tomb k v -> return (S k v)
-        _        -> return b
+        Tomb s -> return (SNode s)
+        _      -> return b
 resurrect b = return b
 {-# INLINE resurrect #-}
 
 contract :: Level -> MainNode k v -> MainNode k v
 contract lev (CNode bmp arr) | lev > 0
                            , popCount bmp == 1
-                           , S k v <- A.head arr
-                           = Tomb k v
+                           , SNode s <- A.head arr
+                           = Tomb s
 contract _ x = x
 {-# INLINE contract #-}
 
@@ -279,11 +283,11 @@ unsafeToList (Map root) = go root
             main <- readIORef inode
             case main of
                 CNode bmp arr -> A.foldM' go2 [] (popCount bmp) arr
-                Tomb k v -> return [(k,v)]
-                Collision xs -> return xs
+                Tomb (S k v) -> return [(k,v)]
+                Collision xs -> return $ map (\(S k v) -> (k,v)) xs
 
         go2 xs (I inode) = go inode >>= \ys -> return (ys ++ xs)
-        go2 xs (S k v) = return $ (k,v) : xs
+        go2 xs (SNode (S k v)) = return $ (k,v) : xs
 {-# INLINABLE unsafeToList #-}
 
 -----------------------------------------------------------------------
@@ -354,7 +358,7 @@ printMap (Map root) = goI root
             putStr $ "(C " ++ (show bmp) ++ " ["
             A.mapM_ (\b -> goB b >> putStr ", ") (popCount bmp) arr
             putStr $ "] )"
-        goM (Tomb k v) = putStr $ "(T " ++ (show k) ++ " " ++ (show v) ++ ")"
+        goM (Tomb (S k v)) = putStr $ "(T " ++ (show k) ++ " " ++ (show v) ++ ")"
         goM (Collision xs) = putStr $ "(Collision " ++ show xs ++ ")"
         goB (I i) = putStr "\n" >> goI i
-        goB (S k v) = putStr $ "(" ++ (show k) ++ "," ++ (show v) ++ ")"
+        goB (SNode (S k v)) = putStr $ "(" ++ (show k) ++ "," ++ (show v) ++ ")"
