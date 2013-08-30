@@ -74,36 +74,36 @@ delete i n arr = runST $ do
 -----------------------------------------------------------------------
 
 mapM :: PrimMonad m => (a -> m b) -> Int -> Array a -> m (Array b)
-mapM f n arr = do
+mapM f = \n arr -> do
     marr <- newArray n undefined
-    go arr marr 0 n
+    go n arr marr 0
     unsafeFreezeArray marr
     where
-        go arr marr i n
+        go n arr marr i
             | i >= n = return ()
             | otherwise = do
                 x <- indexArrayM arr i
                 writeArray marr i =<< f x
-                go arr marr (i+1) n
+                go n arr marr (i+1)
 {-# INLINE mapM #-}
 
 mapM_ :: PrimMonad m => (a -> m b) -> Int -> Array a -> m ()
-mapM_ f n arr = go arr 0 n
+mapM_ f = \n arr -> go n arr 0
     where
-        go arr i n
+        go n arr i
             | i >= n = return ()
             | otherwise = do
                 x <- indexArrayM arr i
                 _ <- f x
-                go arr (i+1) n
+                go n arr (i+1)
 {-# INLINE mapM_ #-}
 
 foldM' :: PrimMonad m => (b -> a -> m b) -> b -> Int -> Array a -> m b
-foldM' f z0 n arr0 = go arr0 n 0 z0
+foldM' f z0 = \n arr -> go n arr 0 z0
     where
-        go arr n i !z
+        go n arr i !z
             | i >= n = return z
             | otherwise = do
                 x <- indexArrayM arr i
-                go arr n (i+1) =<< f z x
+                go n arr (i+1) =<< f z x
 {-# INLINE foldM' #-}
