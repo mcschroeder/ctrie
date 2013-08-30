@@ -1,15 +1,20 @@
 {-# LANGUAGE BangPatterns, PatternGuards, MagicHash #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 -----------------------------------------------------------------------
+-- | A non-blocking concurrent map from hashable keys to values.
 --
--- This is based on
+-- The implementation is based on /lock-free concurrent hash tries/
+-- (aka /Ctries/) as described by:
 --
---    * Aleksander Propoec, Phil Bagwell, Martin Odersky,
+--    * Aleksander Prokopec, Phil Bagwell, Martin Odersky,
 --      \"/Cache-Aware Lock-Free Concurent Hash Tries/\"
 --
 --    * Aleksander Prokopec, Nathan G. Bronson, Phil Bagwell,
 --      Martin Odersky \"/Concurrent Tries with Efficient Non-Blocking
 --      Snapshots/\"
+--
+-- Operations have a worst-case complexity of /O(log n)/, with a base
+-- equal to the size of the native 'Word'.
 --
 -----------------------------------------------------------------------
 
@@ -30,13 +35,22 @@
 
 module Control.Concurrent.Map
     ( Map
+
+      -- * Construction
     , empty
+
+      -- * Modification
     , insert
     , delete
+
+      -- * Query
     , lookup
+
+      -- * Lists
     , fromList
     , unsafeToList
-    , printMap
+
+    --, printMap
     ) where
 
 import Control.Applicative ((<$>))
@@ -56,6 +70,7 @@ import qualified Control.Concurrent.Map.Array as A
 
 -----------------------------------------------------------------------
 
+-- | A map from keys @k@ to values @v@.
 newtype Map k v = Map (INode k v)
 
 type INode k v = IORef (MainNode k v)
@@ -85,6 +100,7 @@ hash = fromIntegral . H.hash
 -----------------------------------------------------------------------
 -- * Construction
 
+-- | /O(1)/. Construct an empty map.
 empty :: IO (Map k v)
 empty = Map <$> newIORef (CNode 0 A.empty)
 
@@ -92,6 +108,8 @@ empty = Map <$> newIORef (CNode 0 A.empty)
 -----------------------------------------------------------------------
 -- * Modification
 
+-- | /O(log n)/. Associate the given value with the given key.
+-- If the key is already present in the map, the old value is replaced.
 insert :: (Eq k, Hashable k) => k -> v -> Map k v -> IO ()
 insert k v (Map root) = go0
     where
@@ -149,6 +167,8 @@ newINode h1 k1 v1 h2 k2 v2 lev
                      newIORef $ CNode bmp $ A.singleton (INode inode')
 
 
+-- | /O(log n)/. Remove the given key and its associated value from the map,
+-- if present.
 delete :: (Eq k, Hashable k) => k -> Map k v -> IO ()
 delete k (Map root) = go0
     where
@@ -189,6 +209,7 @@ delete k (Map root) = go0
 -----------------------------------------------------------------------
 -- * Query
 
+-- | /O(log n)/. Return the value associated with the given key, or 'Nothing'.
 lookup :: (Eq k, Hashable k) => k -> Map k v -> IO (Maybe v)
 lookup k (Map root) = go0
     where
@@ -270,14 +291,15 @@ contract _ x = x
 -----------------------------------------------------------------------
 -- * Lists
 
+-- | /O(n * log n)/. Construct a map from a list of key/value pairs.
 fromList :: (Eq k, Hashable k) => [(k,v)] -> IO (Map k v)
 fromList xs = empty >>= \m -> mapM_ (\(k,v) -> insert k v m) xs >> return m
 {-# INLINABLE fromList #-}
 
--- NOTE: 'unsafeToList' has no atomicity guarantees (meaning concurrent
--- changes to the map will lead to an inconsistent result) and probably
--- atrocious performance. It only exists so we can test some stuff before
--- proper snapshotting is implemented.
+-- | /O(n)/. Unsafely convert the map to a list of key/value pairs.
+--
+-- WARNING: 'unsafeToList' makes no atomicity guarantees. Concurrent
+-- changes to the map will lead to inconsistent results.
 unsafeToList :: Map k v -> IO [(k,v)]
 unsafeToList (Map root) = go root
     where
