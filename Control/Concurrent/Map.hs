@@ -375,15 +375,15 @@ prevLevel = subtract bitsPerSubkey
 -----------------------------------------------------------------------
 
 -- TODO
-printMap :: (Show k, Show v) => Map k v -> IO ()
-printMap (Map root) = goI root
-    where
-        goI inode = putStr "(I " >> readIORef inode >>= goM >> putStr ")\n"
-        goM (CNode bmp arr) = do
-            putStr $ "(C " ++ (show bmp) ++ " ["
-            A.mapM_ (\b -> goB b >> putStr ", ") (popCount bmp) arr
-            putStr $ "] )"
-        goM (Tomb (S k v)) = putStr $ "(T " ++ (show k) ++ " " ++ (show v) ++ ")"
-        goM (Collision xs) = putStr $ "(Collision " ++ show xs ++ ")"
-        goB (INode i) = putStr "\n" >> goI i
-        goB (SNode (S k v)) = putStr $ "(" ++ (show k) ++ "," ++ (show v) ++ ")"
+--printMap :: (Show k, Show v) => Map k v -> IO ()
+--printMap (Map root) = goI root
+--    where
+--        goI inode = putStr "(I " >> readIORef inode >>= goM >> putStr ")\n"
+--        goM (CNode bmp arr) = do
+--            putStr $ "(C " ++ (show bmp) ++ " ["
+--            A.mapM_ (\b -> goB b >> putStr ", ") (popCount bmp) arr
+--            putStr $ "] )"
+--        goM (Tomb (S k v)) = putStr $ "(T " ++ (show k) ++ " " ++ (show v) ++ ")"
+--        goM (Collision xs) = putStr $ "(Collision " ++ show xs ++ ")"
+--        goB (INode i) = putStr "\n" >> goI i
+--        goB (SNode (S k v)) = putStr $ "(" ++ (show k) ++ "," ++ (show v) ++ ")"
