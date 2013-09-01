@@ -18,21 +18,6 @@
 --
 -----------------------------------------------------------------------
 
--- [Note: CAS and pointer equality]
--- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
--- For the atomic compare-and-swap, we need to be able to compare two
--- CNode objects. We can't do an actual '==' comparison, as that would
--- entail traversing the whole subtree. We could add a 'Unique' to the
--- CNode and compare on that, but we don't want the overhead.
---
--- The only remaining option is pointer equality. The "proper" way would
--- be to use 'StableName' (although we'd need 'unsafePerformIO' to use it
--- inside 'atomicModifyIORef') but GHC's 'reallyUnsafePtrEquality#' is
--- more than twice as fast and, despite the scary name, seems to be
--- perfectly safe to use (unordered-containers uses it, for example).
---
--- If portability is a concern, we can always #ifdef the relevant section.
-
 module Control.Concurrent.Map
     ( Map
 
@@ -55,6 +40,7 @@ module Control.Concurrent.Map
 
 import Control.Applicative ((<$>))
 import Control.Monad
+import Data.Atomics
 import Data.Bits
 import Data.Hashable (Hashable)
 import qualified Data.Hashable as H
@@ -62,7 +48,6 @@ import Data.IORef
 import qualified Data.List as List
 import Data.Maybe
 import Data.Word
-import GHC.Exts ((==#), reallyUnsafePtrEquality#)
 import Prelude hiding (lookup)
 
 import qualified Control.Concurrent.Map.Array as A
@@ -115,9 +100,9 @@ insert k v (Map root) = go0
         h = hash k
         go0 = go 0 undefined root
         go lev parent inode = do
-            main <- readIORef inode
-            case main of
-                cn@(CNode bmp arr) -> do
+            ticket <- readForCAS inode
+            case peekTicket ticket of
+                CNode bmp arr -> do
                     let m = mask h lev
                         i = sparseIndex bmp m
                         n = popCount bmp
@@ -125,30 +110,30 @@ insert k v (Map root) = go0
                         then do
                             let arr' = A.insert (SNode (S k v)) i n arr
                                 cn'  = CNode (bmp .|. m) arr'
-                            unlessM (compareAndSwap inode cn cn') go0
+                            unlessM (fst <$> casIORef inode ticket cn') go0
 
                         else case A.index arr i of
                             SNode (S k2 v2)
                                 | k == k2 -> do
                                     let arr' = A.update (SNode (S k v)) i n arr
                                         cn'  = CNode bmp arr'
-                                    unlessM (compareAndSwap inode cn cn') go0
+                                    unlessM (fst <$> casIORef inode ticket cn') go0
 
                                 | otherwise -> do
                                     let h2 = hash k2
                                     inode2 <- newINode h k v h2 k2 v2 (nextLevel lev)
                                     let arr' = A.update (INode inode2) i n arr
                                         cn'  = CNode bmp arr'
-                                    unlessM (compareAndSwap inode cn cn') go0
+                                    unlessM (fst <$> casIORef inode ticket cn') go0
 
                             INode inode2 -> go (nextLevel lev) inode inode2
 
                 Tomb _ -> clean parent (prevLevel lev) >> go0
 
-                col@(Collision arr) -> do
+                Collision arr -> do
                     let arr' = S k v : filter (\(S k2 _) -> k2 /= k) arr
                         col' = Collision arr'
-                    unlessM (compareAndSwap inode col col') go0
+                    unlessM (fst <$> casIORef inode ticket col') go0
 
 {-# INLINABLE insert #-}
 
@@ -174,9 +159,9 @@ delete k (Map root) = go0
         h = hash k
         go0 = go 0 undefined root
         go lev parent inode = do
-            main <- readIORef inode
-            case main of
-                cn@(CNode bmp arr) -> do
+            ticket <- readForCAS inode
+            case peekTicket ticket of
+                CNode bmp arr -> do
                     let m = mask h lev
                         i = sparseIndex bmp m
                     if bmp .&. m == 0
@@ -187,7 +172,7 @@ delete k (Map root) = go0
                                     let arr' = A.delete i (popCount bmp) arr
                                         cn'  = CNode (bmp `xor` m) arr'
                                         cn'' = contract lev cn'
-                                    unlessM (compareAndSwap inode cn cn'') go0
+                                    unlessM (fst <$> casIORef inode ticket cn'') go0
                                     whenM (isTomb <$> readIORef inode) $
                                         cleanParent parent inode h (prevLevel lev)
 
@@ -197,11 +182,11 @@ delete k (Map root) = go0
 
                 Tomb _ -> clean parent (prevLevel lev) >> go0
 
-                col@(Collision arr) -> do
+                Collision arr -> do
                     let arr' = filter (\(S k2 _) -> k2 /= k) $ arr
                         col' | [s] <- arr' = Tomb s
                              | otherwise   = Collision arr'
-                    unlessM (compareAndSwap inode col col') go0
+                    unlessM (fst <$> casIORef inode ticket col') go0
 
 {-# INLINABLE delete #-}
 
@@ -241,18 +226,18 @@ lookup k (Map root) = go0
 
 clean :: INode k v -> Level -> IO ()
 clean inode lev = do
-    main <- readIORef inode
-    case main of
+    ticket <- readForCAS inode
+    case peekTicket ticket of
         cn@(CNode _ _) -> do
             cn' <- compress lev cn
-            void $ compareAndSwap inode cn cn'
+            void $ casIORef inode ticket cn'
         _ -> return ()
 {-# INLINE clean #-}
 
 cleanParent :: INode k v -> INode k v -> Hash -> Level -> IO ()
 cleanParent parent inode h lev = do
-    pmain <- readIORef parent
-    case pmain of
+    ticket <- readForCAS parent
+    case peekTicket ticket of
         cn@(CNode bmp arr) -> do
             let m = mask h lev
                 i = sparseIndex bmp m
@@ -261,7 +246,7 @@ cleanParent parent inode h lev = do
                     INode inode2 | inode2 == inode ->
                         whenM (isTomb <$> readIORef inode) $ do
                             cn' <- compress lev cn
-                            unlessM (compareAndSwap parent cn cn') $
+                            unlessM (fst <$> casIORef parent ticket cn') $
                                 cleanParent parent inode h lev
                     _ -> return ()
         _ -> return ()
@@ -316,19 +301,6 @@ unsafeToList (Map root) = go root
 {-# INLINABLE unsafeToList #-}
 
 -----------------------------------------------------------------------
-
--- see [Note: CAS and pointer equality]
-compareAndSwap :: IORef a -> a -> a -> IO Bool
-compareAndSwap ref old new =
-    atomicModifyIORef' ref (\cur -> if cur `ptrEq` old
-                                    then (new, True)
-                                    else (cur, False))
-{-# INLINE compareAndSwap #-}
-
-ptrEq :: a -> a -> Bool
-ptrEq !x !y = reallyUnsafePtrEquality# x y ==# 1#
-{-# INLINE ptrEq #-}
-
 
 whenM :: Monad m => m Bool -> m () -> m ()
 whenM p s = p >>= \t -> if t then s else return ()

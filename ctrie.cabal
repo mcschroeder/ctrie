@@ -20,6 +20,7 @@ library
   other-modules:     Control.Concurrent.Map.Array
   build-depends:
       base ==4.6.*
+    , atomic-primops ==0.4.*
     , hashable ==1.2.*
     , primitive ==0.5.*
 
