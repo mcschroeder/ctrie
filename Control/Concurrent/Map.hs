@@ -313,7 +313,7 @@ unlessM p s = p >>= \t -> if t then return () else s
 -----------------------------------------------------------------------
 
 hashLength :: Int
-hashLength = bitSize (undefined :: Word)
+hashLength = finiteBitSize (undefined :: Word)
 
 bitsPerSubkey :: Int
 bitsPerSubkey = floor . logBase (2 :: Float) . fromIntegral $ hashLength

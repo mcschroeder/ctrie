@@ -2,7 +2,7 @@ name:                ctrie
 version:             0.1.0.2
 synopsis:            Non-blocking concurrent map
 description:
-  A non-blocking concurrent map implementation based on 
+  A non-blocking concurrent map implementation based on
   /lock-free concurrent hash tries/ (aka /Ctries/).
 license:             MIT
 license-file:        LICENSE
@@ -19,8 +19,8 @@ library
   exposed-modules:   Control.Concurrent.Map
   other-modules:     Control.Concurrent.Map.Array
   build-depends:
-      base ==4.6.*
-    , atomic-primops ==0.4.*
+      base >=4.7 && <4.8
+    , atomic-primops ==0.6.*
     , hashable ==1.2.*
     , primitive ==0.5.*
 
@@ -61,7 +61,7 @@ benchmark sequential
 benchmark concurrent
   hs-source-dirs:    benchmarks
   main-is:           Concurrent.hs
-  type:              exitcode-stdio-1.0  
+  type:              exitcode-stdio-1.0
 
   build-depends:
       base
