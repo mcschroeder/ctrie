@@ -5,6 +5,7 @@ module Main where
 import Control.Applicative ((<$>))
 import Control.Concurrent.Async
 import Control.Concurrent.MVar
+import Control.Concurrent.STM
 import Control.DeepSeq
 import Control.Exception (evaluate)
 import Control.Monad
@@ -48,18 +49,20 @@ main = do
     defaultMain
         [ env mkConcMap $ \ ~(elemsS, cmS) ->
           bgroup "Control.Concurrent.Map"
-            [ bgroup "String"
-                [ bench "8 threads, n, 2:4:1"   $ whnfIO $ runCM cmS elemsS 8  n     (2,4,1)
-                , bench "8 threads, 10n, 6:2:1" $ whnfIO $ runCM cmS elemsS 8 (n*10) (6,2,1)
-                ]
+            [ bench "8 threads, n, 2:4:1"   $ whnfIO $ runCM cmS elemsS 8  n     (2,4,1)
+            , bench "8 threads, 10n, 6:2:1" $ whnfIO $ runCM cmS elemsS 8 (n*10) (6,2,1)
             ]
 
         , env mkHashMap $ \ ~(elemsS, hmS) ->
           bgroup "Data.HashMap (MVar)"
-            [ bgroup "String"
-                [ bench "8 threads, n, 2:4:1"   $ whnfIO $ runHM_mvar hmS elemsS 8  n     (2,4,1)
-                , bench "8 threads, 10n, 6:2:1" $ whnfIO $ runHM_mvar hmS elemsS 8 (n*10) (6,2,1)
-                ]
+            [ bench "8 threads, n, 2:4:1"   $ whnfIO $ runHM_mvar hmS elemsS 8  n     (2,4,1)
+            , bench "8 threads, 10n, 6:2:1" $ whnfIO $ runHM_mvar hmS elemsS 8 (n*10) (6,2,1)
+            ]
+
+        , env mkHashMap $ \ ~(elemsS, hmS) ->
+          bgroup "Data.HashMap (TVar)"
+            [ bench "8 threads, n, 2:4:1"   $ whnfIO $ runHM_tvar hmS elemsS 8  n     (2,4,1)
+            , bench "8 threads, 10n, 6:2:1" $ whnfIO $ runHM_tvar hmS elemsS 8 (n*10) (6,2,1)
             ]
         ]
 
@@ -119,7 +122,7 @@ cm_lookup k m = do
 
 
 -----------------------------------------------------------------------
--- Data.HashMap
+-- Data.HashMap (MVar)
 
 runHM_mvar hm elems nThreads nOps ratios = do
     hm_mvar <- newMVar hm
@@ -151,4 +154,28 @@ hm_delete k mvar = do
 {-# SPECIALIZE hm_delete :: String -> MVar (HM.HashMap String Int) -> IO () #-}
 {-# SPECIALIZE hm_delete :: Int -> MVar (HM.HashMap Int Int) -> IO () #-}
 
+-----------------------------------------------------------------------
+-- Data.HashMap (TVar)
+
+runHM_tvar hm elems nThreads nOps ratios = do
+    hm_tvar <- newTVarIO hm
+    runAll $ mkOps hm_lookup_tvar hm_insert_tvar hm_delete_tvar hm_tvar elems nThreads nOps ratios
+
+hm_lookup_tvar :: (Eq k, Hashable k) => k -> TVar (HM.HashMap k v) -> IO ()
+hm_lookup_tvar k tvar = do
+    v <- atomically $ do m <- readTVar tvar
+                         return $ HM.lookup k m
+    v `seq` return ()
+{-# SPECIALIZE hm_lookup_tvar :: String -> TVar (HM.HashMap String Int) -> IO () #-}
+{-# SPECIALIZE hm_lookup_tvar :: Int -> TVar (HM.HashMap Int Int) -> IO () #-}
+
+hm_insert_tvar :: (Eq k, Hashable k) => k -> v -> TVar (HM.HashMap k v) -> IO ()
+hm_insert_tvar k v tvar = atomically $ modifyTVar' tvar (HM.insert k v)
+{-# SPECIALIZE hm_insert_tvar :: String -> Int -> TVar (HM.HashMap String Int) -> IO () #-}
+{-# SPECIALIZE hm_insert_tvar :: Int -> Int -> TVar (HM.HashMap Int Int) -> IO () #-}
+
+hm_delete_tvar :: (Eq k, Hashable k) => k -> TVar (HM.HashMap k v) -> IO ()
+hm_delete_tvar k tvar = atomically $ modifyTVar' tvar (HM.delete k)
+{-# SPECIALIZE hm_delete_tvar :: String -> TVar (HM.HashMap String Int) -> IO () #-}
+{-# SPECIALIZE hm_delete_tvar :: Int -> TVar (HM.HashMap Int Int) -> IO () #-}
 

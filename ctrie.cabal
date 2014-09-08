@@ -75,6 +75,7 @@ benchmark concurrent
     , containers
     , unordered-containers
     , ctrie
+    , stm
 
   ghc-options: -O2 -rtsopts -threaded -with-rtsopts=-N
 
