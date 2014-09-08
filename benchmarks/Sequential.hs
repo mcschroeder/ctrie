@@ -5,7 +5,6 @@ import Control.DeepSeq
 import Control.Exception (evaluate)
 import Control.Monad.IO.Class (liftIO)
 import Criterion.Main
-import Criterion.Config
 import Data.Hashable
 import Data.List (foldl')
 import Data.Foldable (foldlM)
@@ -21,27 +20,56 @@ import qualified Data.HashMap.Strict as HM
 
 -- like with the tests, a lot of this is cribbed from unordered-containers
 
+-- TODO: make Ctrie a proper NFData instance
+instance (NFData k, NFData v) => NFData (CM.Map k v) where
+    rnf m = rnf $ unsafePerformIO $ CM.unsafeToList m
+
 main :: IO ()
 main = do
-    let mS = M.fromList elemsS :: M.Map String Int
-        mI = M.fromList elemsI :: M.Map Int Int
-        hmS = HM.fromList elemsS :: HM.HashMap String Int
-        hmI = HM.fromList elemsI :: HM.HashMap Int Int
-        imI = IM.fromList elemsI :: IM.IntMap Int
-    cmS <- CM.fromList elemsS :: IO (CM.Map String Int)
-    cmI <- CM.fromList elemsI :: IO (CM.Map Int Int)
-    defaultMainWith defaultConfig
-        (liftIO $ do
-            evaluate $ rnf mS
-            evaluate $ rnf mI
-            evaluate $ rnf hmS
-            evaluate $ rnf hmI
-            evaluate $ rnf imI
-            evaluate $ rnf $ unsafePerformIO $ CM.unsafeToList cmS
-            evaluate $ rnf $ unsafePerformIO $ CM.unsafeToList cmI
-        )
-        [
-            bgroup "Data.Map"
+    let n = 2^12
+        keysS = rndS 8 n
+        keysI = rndI (n+n) n
+        elemsS = zip keysS [1..n]
+        elemsI = zip keysI [1..n]
+
+    let mkConcMap = do
+        cmS <- CM.fromList elemsS :: IO (CM.Map String Int)
+        cmI <- CM.fromList elemsI :: IO (CM.Map Int Int)
+        return (keysS, elemsS, cmS, keysI, elemsI, cmI)
+
+    let mkMap = do
+        let mS = M.fromList elemsS :: M.Map String Int
+            mI = M.fromList elemsI :: M.Map Int Int
+        return (keysS, elemsS, mS, keysI, elemsI, mI)
+
+    let mkHashMap = do
+        let hmS = HM.fromList elemsS :: HM.HashMap String Int
+            hmI = HM.fromList elemsI :: HM.HashMap Int Int
+        return (keysS, elemsS, hmS, keysI, elemsI, hmI)
+
+    let mkIntMap = do
+        let imI = IM.fromList elemsI :: IM.IntMap Int
+        return (keysI, elemsI, imI)
+
+    defaultMain [
+          env mkConcMap $ \ ~(keysS, elemsS, cmS, keysI, elemsI, cmI) ->
+          bgroup "Control.Concurrent.Map"
+            [ bgroup "lookup"
+                [ bench "String" $ whnfIO $ lookupCM keysS cmS
+                , bench "Int" $ whnfIO $ lookupCM keysI $ cmI
+                ]
+            , bgroup "insert"
+                [ bench "String" $ whnfIO $ insertCM elemsS =<< CM.empty
+                , bench "Int" $ whnfIO $ insertCM elemsI =<< CM.empty
+                ]
+            , bgroup "delete"
+                [ bench "String" $ whnfIO $ deleteCM keysS cmS
+                , bench "Int" $ whnfIO $ deleteCM keysI cmI
+                ]
+            ]
+
+        , env mkMap $ \ ~(keysS, elemsS, mS, keysI, elemsI, mI) ->
+          bgroup "Data.Map"
             [ bgroup "lookup"
                 [ bench "String" $ whnf (lookupM keysS) mS
                 , bench "Int" $ whnf (lookupM keysI) mI
@@ -56,7 +84,8 @@ main = do
                 ]
             ]
 
-            , bgroup "Data.HashMap"
+        , env mkHashMap $ \ ~(keysS, elemsS, hmS, keysI, elemsI, hmI) ->
+          bgroup "Data.HashMap"
             [ bgroup "lookup"
                 [ bench "String" $ whnf (lookupHM keysS) hmS
                 , bench "Int" $ whnf (lookupHM keysI) hmI
@@ -71,7 +100,8 @@ main = do
                 ]
             ]
 
-            , bgroup "Data.IntMap"
+        , env mkIntMap $ \ ~(keysI, elemsI, imI) ->
+          bgroup "Data.IntMap"
             [ bgroup "lookup"
                 [ bench "Int" $ whnf (lookupIM keysI) imI ]
             , bgroup "insert"
@@ -79,28 +109,9 @@ main = do
             , bgroup "delete"
                 [ bench "Int" $ whnf (deleteIM keysI) imI ]
             ]
-
-            , bgroup "Control.Concurrent.Map"
-            [ bgroup "lookup"
-                [ bench "String" $ lookupCM keysS cmS
-                , bench "Int" $ lookupCM keysI cmI
-                ]
-            , bgroup "insert"
-                [ bench "String" $ insertCM elemsS =<< CM.empty
-                , bench "Int" $ insertCM elemsI =<< CM.empty
-                ]
-            , bgroup "delete"
-                [ bench "String" $ deleteCM keysS cmS
-                , bench "Int" $ deleteCM keysI cmI
-                ]
-            ]
         ]
-    where
-        n = 2^12
-        elemsS = zip keysS [1..n]
-        elemsI = zip keysI [1..n]
-        keysS = rndS 8 n
-        keysI = rndI (n+n) n
+
+
 
 rndS :: Int -> Int -> [String]
 rndS strlen num = take num $ split $ randomRs ('a', 'z') $ mkStdGen 1234

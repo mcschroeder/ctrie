@@ -51,7 +51,7 @@ benchmark sequential
     , random
     , transformers
     , deepseq
-    , criterion
+    , criterion == 1.0.*
     , containers
     , unordered-containers
     , ctrie
@@ -71,12 +71,12 @@ benchmark concurrent
     , random-shuffle
     , transformers
     , deepseq
-    , criterion
+    , criterion == 1.0.*
     , containers
     , unordered-containers
     , ctrie
 
-  ghc-options: -O2 -rtsopts -threaded
+  ghc-options: -O2 -rtsopts -threaded -with-rtsopts=-N
 
 source-repository head
   type:     git

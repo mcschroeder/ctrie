@@ -10,7 +10,6 @@ import Control.Exception (evaluate)
 import Control.Monad
 import Control.Monad.IO.Class (liftIO)
 import Criterion.Main
-import Criterion.Config
 import Data.Hashable
 import Data.List (foldl')
 import Data.Foldable (foldlM)
@@ -24,50 +23,45 @@ import qualified Data.Map as M
 import qualified Data.IntMap as IM
 import qualified Data.HashMap.Strict as HM
 
+
+instance (NFData k, NFData v) => NFData (CM.Map k v) where
+    rnf m = rnf $ unsafePerformIO $ CM.unsafeToList m
+
 main :: IO ()
 main = do
-    let hmS = HM.fromList elemsS :: HM.HashMap String Int
-    hmS_mvar <- newMVar hmS
-    let hmS_ops241_8     = hmOps hmS_mvar elemsS 8 n      (2,4,1)
-    let hmS_ops621_n10_8 = hmOps hmS_mvar elemsS 8 (n*10) (6,2,1)
-
-    cmS <- CM.fromList elemsS :: IO (CM.Map String Int)
-    let cmS_ops241_8     = cmOps cmS elemsS 8 n      (2,4,1)
-    let cmS_ops621_n10_8 = cmOps cmS elemsS 8 (n*10) (6,2,1)
-
-    putStrLn $ "n=" ++ show n
-
-    defaultMainWith defaultConfig
-        (liftIO $ do
-            evaluate $ rnf hmS
-            evaluate $ sum $ map length hmS_ops241_8
-            evaluate $ sum $ map length hmS_ops621_n10_8
-            evaluate $ rnf $ unsafePerformIO $ CM.unsafeToList cmS
-            evaluate $ sum $ map length cmS_ops241_8
-            evaluate $ sum $ map length cmS_ops621_n10_8
-            return ()
-        )
-        [
-            bgroup "Data.HashMap (MVar)"
-            [ bgroup "String"
-                [ bench "8 threads, n, 2:4:1"   $ runAll hmS_ops241_8
-                , bench "8 threads, 10n, 6:2:1" $ runAll hmS_ops621_n10_8
-                ]
-            ]
-            ,
-            bgroup "Control.Concurrent.Map"
-            [ bgroup "String"
-                [ bench "8 threads, n, 2:4:1"   $ runAll cmS_ops241_8
-                , bench "8 threads, 10n, 6:2:1" $ runAll cmS_ops621_n10_8
-                ]
-            ]
-        ]
-    where
-        n = 2^12
+    let n = 2^12
         elemsS = zip keysS [1..n]
         elemsI = zip keysI [1..n]
         keysS = rndS 8 n
         keysI = rndI (n+n) n
+
+    putStrLn $ "n=" ++ show n
+
+    let mkConcMap = do
+        cmS <- CM.fromList elemsS :: IO (CM.Map String Int)
+        return (elemsS, cmS)
+
+    let mkHashMap = do
+        let hmS = HM.fromList elemsS :: HM.HashMap String Int
+        return (elemsS, hmS)
+
+    defaultMain
+        [ env mkConcMap $ \ ~(elemsS, cmS) ->
+          bgroup "Control.Concurrent.Map"
+            [ bgroup "String"
+                [ bench "8 threads, n, 2:4:1"   $ whnfIO $ runCM cmS elemsS 8  n     (2,4,1)
+                , bench "8 threads, 10n, 6:2:1" $ whnfIO $ runCM cmS elemsS 8 (n*10) (6,2,1)
+                ]
+            ]
+
+        , env mkHashMap $ \ ~(elemsS, hmS) ->
+          bgroup "Data.HashMap (MVar)"
+            [ bgroup "String"
+                [ bench "8 threads, n, 2:4:1"   $ whnfIO $ runHM_mvar hmS elemsS 8  n     (2,4,1)
+                , bench "8 threads, 10n, 6:2:1" $ whnfIO $ runHM_mvar hmS elemsS 8 (n*10) (6,2,1)
+                ]
+            ]
+        ]
 
 
 rndS :: Int -> Int -> [String]
@@ -78,12 +72,10 @@ rndS strlen num = take num $ split $ randomRs ('a', 'z') $ mkStdGen 1234
 rndI :: Int -> Int -> [Int]
 rndI upper num = take num $ randomRs (0, upper) $ mkStdGen 1234
 
-
 runAll :: [[IO ()]] -> IO ()
 runAll ops = do
     as <- mapM (async . sequence_) ops
     mapM_ wait as
-
 
 mkOps :: (k -> m -> IO ())       -- lookup function
       -> (k -> v -> m -> IO ())  -- insert function
@@ -107,15 +99,16 @@ mkOps lookup insert delete m elems nThreads nOps (rl,ri,rd) =
             ++ [insert k v m | (k,v) <- take numInserts insertElems]
             ++ [delete k   m | (k,_) <- take numDeletes deleteElems]
 
-        ops = take nThreads
-            $ iterate (\ops -> shuffle' ops nOps (mkStdGen 1234))
-            $ take nOps ops0
+        !ops = take nThreads
+            $! iterate (\ops -> shuffle' ops nOps (mkStdGen 1234))
+            $! take nOps ops0
     in ops
 
 -----------------------------------------------------------------------
 -- Control.Concurrent.Map
 
-cmOps = mkOps cm_lookup CM.insert CM.delete
+runCM cm elems nThreads nOps ratios = do
+    runAll $ mkOps cm_lookup CM.insert CM.delete cm elems nThreads nOps ratios
 
 cm_lookup :: (Eq k, Hashable k) => k -> CM.Map k v -> IO ()
 cm_lookup k m = do
@@ -128,7 +121,9 @@ cm_lookup k m = do
 -----------------------------------------------------------------------
 -- Data.HashMap
 
-hmOps = mkOps hm_lookup hm_insert hm_delete
+runHM_mvar hm elems nThreads nOps ratios = do
+    hm_mvar <- newMVar hm
+    runAll $ mkOps hm_lookup hm_insert hm_delete hm_mvar elems nThreads nOps ratios
 
 hm_lookup :: (Eq k, Hashable k) => k -> MVar (HM.HashMap k v) -> IO ()
 hm_lookup k mvar = do
