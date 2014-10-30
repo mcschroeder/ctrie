@@ -8,10 +8,8 @@
 --
 --    * Aleksander Prokopec, Phil Bagwell, Martin Odersky,
 --      \"/Cache-Aware Lock-Free Concurent Hash Tries/\"
---
---    * Aleksander Prokopec, Nathan G. Bronson, Phil Bagwell,
---      Martin Odersky \"/Concurrent Tries with Efficient Non-Blocking
---      Snapshots/\"
+--    * Aleksander Prokopec, Nathan G. Bronson, Phil Bagwell, Martin
+--      Odersky \"/Concurrent Tries with Efficient Non-Blocking Snapshots/\"
 --
 -- Operations have a worst-case complexity of /O(log n)/, with a base
 -- equal to the size of the native 'Word'.
