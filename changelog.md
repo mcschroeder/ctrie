@@ -2,6 +2,7 @@
 
 ## 0.2  *April 2015*
 		* Loosen version bounds
+		* Refactor internally (to make it more like ttrie)
 
 ## 0.1.0.2  *Oct 2014*
         * Use newer versions of base and atomic-primops

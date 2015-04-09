@@ -38,7 +38,6 @@ import Control.Applicative ((<$>))
 import Control.Monad
 import Data.Atomics
 import Data.IORef
-import qualified Data.List as List
 import Data.Maybe
 import Prelude hiding (lookup)
 
@@ -49,29 +48,24 @@ import Data.SparseArray
 -- | A map from keys @k@ to values @v@.
 newtype Map k v = Map (INode k v)
 
-type INode k v = IORef (MainNode k v)
+type INode k v = IORef (Node k v)
 
-data MainNode k v = CNode !(SparseArray (Branch k v))
-                  | Tomb !(SNode k v)
-                  | Collision ![SNode k v]
+data Node k v = Array !(SparseArray (Branch k v))
+              | List  ![Leaf k v]
+              | Tomb  !(Leaf k v)
 
-data Branch k v = INode !(INode k v)
-                | SNode !(SNode k v)
+data Branch k v = I !(INode k v)
+                | L !(Leaf k v)
 
-data SNode k v = S !k v
+data Leaf k v = Leaf !k v
     deriving (Eq, Show)
-
-isTomb :: MainNode k v -> Bool
-isTomb (Tomb _) = True
-isTomb _        = False
 
 -----------------------------------------------------------------------
 -- * Construction
 
 -- | /O(1)/. Construct an empty map.
 empty :: IO (Map k v)
-empty = Map <$> newIORef (CNode emptyArray)
-
+empty = Map <$> newIORef (Array emptyArray)
 
 -----------------------------------------------------------------------
 -- * Modification
@@ -79,83 +73,84 @@ empty = Map <$> newIORef (CNode emptyArray)
 -- | /O(log n)/. Associate the given value with the given key.
 -- If the key is already present in the map, the old value is replaced.
 insert :: (Eq k, Hashable k) => k -> v -> Map k v -> IO ()
-insert k v (Map root) = go0
-    where
-        h = hash k
-        go0 = go 0 undefined root
-        go lev parent inode = do
-            ticket <- readForCAS inode
-            case peekTicket ticket of
-                CNode a -> case arrayLookup lev h a of
-                    Just (INode inode2) -> go (down lev) inode inode2
-                    Just (SNode (S k2 v2))
-                        | k == k2 -> do
-                            let a' = arrayUpdate lev h (SNode (S k v)) a
-                                cn' = CNode a'
-                            unlessM (fst <$> casIORef inode ticket cn') go0
-                        | otherwise -> do
-                            let h2 = hash k2
-                            inode2 <- newINode h k v h2 k2 v2 (down lev)
-                            let a' = arrayUpdate lev h (INode inode2) a
-                                cn'  = CNode a'
-                            unlessM (fst <$> casIORef inode ticket cn') go0
-                    Nothing -> do
-                        let a' = arrayInsert lev h (SNode (S k v)) a
-                            cn' = CNode a'
-                        unlessM (fst <$> casIORef inode ticket cn') go0
+insert k v (Map root) = go root 0 undefined
+  where
+    h = hash k
+    leaf = Leaf k v
+    go inode level parent = do
+        ticket <- readForCAS inode
+        let cas node = do (ok,_) <- casIORef inode ticket node
+                          unless ok (go root 0 undefined)
+        case peekTicket ticket of
+            Array a -> case arrayLookup level h a of
+                Just (I inode2) -> go inode2 (down level) inode
+                Just (L leaf2@(Leaf k2 _))
+                    | k == k2   -> cas $ Array (arrayUpdate level h (L leaf) a)
+                    | otherwise -> cas =<< growTrie level leaf2 a
+                Nothing         -> cas $ Array (arrayInsert level h (L leaf) a)
 
-                Tomb _ -> clean parent (up lev) >> go0
+            List xs -> cas $ List (listInsert leaf xs)
 
-                Collision arr -> do
-                    let arr' = S k v : filter (\(S k2 _) -> k2 /= k) arr
-                        col' = Collision arr'
-                    unlessM (fst <$> casIORef inode ticket col') go0
+            Tomb _  -> clean parent (up level) >> go root 0 undefined
+
+    growTrie level leaf2@(Leaf k2 _) a = do
+        inode2 <- combineLeaves (down level) (hash k2) leaf2
+        return $ Array (arrayUpdate level h (I inode2) a)
+
+    combineLeaves level h2 leaf2
+        | level >= lastLevel = newIORef (List [leaf, leaf2])
+        | otherwise = do
+            case mkPair level h (L leaf) h2 (L leaf2) of
+                Just pair -> newIORef (Array pair)
+                Nothing -> do
+                    inode <- combineLeaves (down level) h2 leaf2
+                    let a = mkSingleton level h (I inode)
+                    newIORef (Array a)
 
 {-# INLINABLE insert #-}
-
-newINode :: Hash -> k -> v -> Hash -> k -> v -> Int -> IO (INode k v)
-newINode h1 k1 v1 h2 k2 v2 lev
-    | lev >= lastLevel = newIORef $ Collision [S k1 v1, S k2 v2]
-    | otherwise = do
-        case mkPair lev h1 (SNode (S k1 v1)) h2 (SNode (S k2 v2)) of
-            Just pair -> newIORef (CNode pair)
-            Nothing -> do
-                inode' <- newINode h1 k1 v1 h2 k2 v2 (down lev)
-                let a = mkSingleton lev h1 (INode inode')
-                newIORef (CNode a)
 
 
 -- | /O(log n)/. Remove the given key and its associated value from the map,
 -- if present.
 delete :: (Eq k, Hashable k) => k -> Map k v -> IO ()
-delete k (Map root) = go0
-    where
-        h = hash k
-        go0 = go 0 undefined root
-        go lev parent inode = do
-            ticket <- readForCAS inode
-            case peekTicket ticket of
-                CNode a -> case arrayLookup lev h a of
-                    Just (INode inode2) -> go (down lev) inode inode2
-                    Just (SNode (S k2 _))
-                        | k == k2 -> do
-                            let a' = arrayDelete lev h a
-                                cn' = contract lev (CNode a')
-                            unlessM (fst <$> casIORef inode ticket cn') go0
-                            whenM (isTomb <$> readIORef inode) $
-                                        cleanParent parent inode h (up lev)
+delete k m@(Map root) = do
+    ok <- go root 0 undefined
+    unless ok (delete k m)
+  where
+    h = hash k
+    go inode level parent = do
+        ticket <- readForCAS inode
+        case peekTicket ticket of
+            Array a -> do
+                ok <- case arrayLookup level h a of
+                    Just (I inode2) -> go inode2 (down level) inode
+                    Just (L (Leaf k2 _))
+                        | k == k2   -> casArrayDelete inode ticket level a
+                        | otherwise -> return True
+                    Nothing         -> return True
+                when ok (compressIfPossible level inode parent)
+                return ok
+            List xs -> casListDelete inode ticket xs
+            Tomb _  -> clean parent (up level) >> go root 0 undefined
 
-                        | otherwise -> return () -- not found
+    compressIfPossible level inode parent = do
+        n <- readIORef inode
+        case n of
+            Tomb _ -> cleanParent parent inode h (up level)
+            _      -> return ()
 
-                    Nothing -> return ()  -- not found
+    casArrayDelete inode ticket level a = do
+        let a' = arrayDelete level h a
+            n  = contract level (Array a')
+        (ok,_) <- casIORef inode ticket n
+        return ok
 
-                Tomb _ -> clean parent (up lev) >> go0
-
-                Collision arr -> do
-                    let arr' = filter (\(S k2 _) -> k2 /= k) $ arr
-                        col' | [s] <- arr' = Tomb s
-                             | otherwise   = Collision arr'
-                    unlessM (fst <$> casIORef inode ticket col') go0
+    casListDelete inode ticket xs = do
+        let xs' = listDelete k xs
+            n | [l] <- xs' = Tomb l
+              | otherwise  = List xs'
+        (ok,_) <- casIORef inode ticket n
+        return ok
 
 {-# INLINABLE delete #-}
 
@@ -164,25 +159,20 @@ delete k (Map root) = go0
 
 -- | /O(log n)/. Return the value associated with the given key, or 'Nothing'.
 lookup :: (Eq k, Hashable k) => k -> Map k v -> IO (Maybe v)
-lookup k (Map root) = go0
-    where
-        h = hash k
-        go0 = go 0 undefined root
-        go lev parent inode = do
-            main <- readIORef inode
-            case main of
-                CNode a -> case arrayLookup lev h a of
-                    Just (INode inode2) -> go (down lev) inode inode2
-                    Just (SNode (S k2 v)) | k == k2 -> return (Just v)
-                                          | otherwise -> return Nothing
-                    Nothing -> return Nothing
-
-                Tomb _ -> clean parent (up lev) >> go0
-
-                Collision xs -> do
-                    case List.find (\(S k2 _) -> k2 == k) xs of
-                        Just (S _ v) -> return (Just v)
-                        _            -> return Nothing
+lookup k (Map root) = go root 0 undefined
+  where
+    h = hash k
+    go inode level parent = do
+        node <- readIORef inode
+        case node of
+            Array a -> case arrayLookup level h a of
+                Just (I inode2) -> go inode2 (down level) inode
+                Just (L (Leaf k2 v))
+                    | k == k2   -> return (Just v)
+                    | otherwise -> return Nothing
+                Nothing         -> return Nothing
+            List xs -> return $ listLookup k xs
+            Tomb _  -> clean parent (up level) >> go root 0 undefined
 
 {-# INLINABLE lookup #-}
 
@@ -190,47 +180,49 @@ lookup k (Map root) = go0
 -- * Internal compression operations
 
 clean :: INode k v -> Level -> IO ()
-clean inode lev = do
+clean inode level = do
     ticket <- readForCAS inode
     case peekTicket ticket of
-        cn@(CNode _) -> do
-            cn' <- compress lev cn
-            void $ casIORef inode ticket cn'
+        n@(Array _) -> do
+            n' <- compress level n
+            void $ casIORef inode ticket n'
         _ -> return ()
 {-# INLINE clean #-}
 
 cleanParent :: INode k v -> INode k v -> Hash -> Level -> IO ()
-cleanParent parent inode h lev = do
+cleanParent parent inode h level = do
     ticket <- readForCAS parent
     case peekTicket ticket of
-        cn@(CNode a) -> case arrayLookup lev h a of
-            Just (INode inode2) | inode2 == inode ->
-                whenM (isTomb <$> readIORef inode) $ do
-                    cn' <- compress lev cn
-                    unlessM (fst <$> casIORef parent ticket cn') $
-                        cleanParent parent inode h lev
+        n@(Array a) -> case arrayLookup level h a of
+            Just (I inode2) | inode2 == inode -> do
+                n2 <- readIORef inode
+                case n2 of
+                    Tomb _ -> do
+                        n' <- compress level n
+                        (ok,_) <- casIORef parent ticket n'
+                        unless ok $ cleanParent parent inode h level
+                    _ -> return ()
             _ -> return ()
         _ -> return ()
 
-compress :: Level -> MainNode k v -> IO (MainNode k v)
-compress lev (CNode a) = contract lev . CNode <$> arrayMapM resurrect a
-compress _ x = return x
+compress :: Level -> Node k v -> IO (Node k v)
+compress level (Array a) = contract level . Array <$> arrayMapM resurrect a
+compress _     n         = return n
 {-# INLINE compress #-}
 
 resurrect :: Branch k v -> IO (Branch k v)
-resurrect b@(INode inode) = do
-    main <- readIORef inode
-    case main of
-        Tomb s -> return (SNode s)
-        _      -> return b
-resurrect b = return b
+resurrect b@(I inode) = do n <- readIORef inode
+                           case n of
+                               Tomb leaf -> return (L leaf)
+                               _         -> return b
+resurrect b           = return b
 {-# INLINE resurrect #-}
 
-contract :: Level -> MainNode k v -> MainNode k v
-contract lev (CNode a) | lev > 0
-                       , Just (SNode s) <- arrayToMaybe a
-                       = Tomb s
-contract _ x = x
+contract :: Level -> Node k v -> Node k v
+contract level (Array a) | level > 0
+                         , Just (L s) <- arrayToMaybe a
+                         = Tomb s
+contract _     n         = n
 {-# INLINE contract #-}
 
 -----------------------------------------------------------------------
@@ -247,24 +239,37 @@ fromList xs = empty >>= \m -> mapM_ (\(k,v) -> insert k v m) xs >> return m
 -- changes to the map will lead to inconsistent results.
 unsafeToList :: Map k v -> IO [(k,v)]
 unsafeToList (Map root) = go root
-    where
-        go inode = do
-            main <- readIORef inode
-            case main of
-                CNode a -> arrayFoldM' go2 [] a
-                Tomb (S k v) -> return [(k,v)]
-                Collision xs -> return $ map (\(S k v) -> (k,v)) xs
+  where
+    go inode = do
+        main <- readIORef inode
+        case main of
+            Array a -> arrayFoldM' go2 [] a
+            List xs -> return $ map (\(Leaf k v) -> (k,v)) xs
+            Tomb (Leaf k v) -> return [(k,v)]
 
-        go2 xs (INode inode) = go inode >>= \ys -> return (ys ++ xs)
-        go2 xs (SNode (S k v)) = return $ (k,v) : xs
+    go2 xs (I inode) = go inode >>= \ys -> return (ys ++ xs)
+    go2 xs (L (Leaf k v)) = return $ (k,v) : xs
 {-# INLINABLE unsafeToList #-}
 
 -----------------------------------------------------------------------
 
-whenM :: Monad m => m Bool -> m () -> m ()
-whenM p s = p >>= \t -> if t then s else return ()
-{-# INLINE whenM #-}
+listLookup :: Eq k => k -> [Leaf k v] -> Maybe v
+listLookup k1 = go
+  where
+    go []                           = Nothing
+    go (Leaf k2 v : xs) | k1 == k2  = Just v
+                        | otherwise = go xs
 
-unlessM :: Monad m => m Bool -> m () -> m ()
-unlessM p s = p >>= \t -> if t then return () else s
-{-# INLINE unlessM #-}
+listInsert :: Eq k => Leaf k v -> [Leaf k v] -> [Leaf k v]
+listInsert y@(Leaf k1 _) = go
+  where
+    go []                             = [y]
+    go (x@(Leaf k2 _):xs) | k1 == k2  = y : xs
+                          | otherwise = x : go xs
+
+listDelete :: Eq k => k -> [Leaf k v] -> [Leaf k v]
+listDelete k1 = go
+  where
+    go []                             = []
+    go (x@(Leaf k2 _):xs) | k1 == k2  = xs
+                          | otherwise = x : go xs
