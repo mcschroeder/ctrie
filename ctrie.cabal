@@ -20,7 +20,7 @@ extra-source-files:  changelog.md
 library
   hs-source-dirs:    src
   exposed-modules:   Control.Concurrent.Map
-  other-modules:     Control.Concurrent.Map.Array
+  other-modules:     Data.SparseArray
   build-depends:
       base >=4.7 && <4.8
     , atomic-primops >=0.6
