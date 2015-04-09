@@ -22,9 +22,9 @@ library
   other-modules:     Control.Concurrent.Map.Array
   build-depends:
       base >=4.7 && <4.8
-    , atomic-primops ==0.6.*
-    , hashable ==1.2.*
-    , primitive ==0.5.*
+    , atomic-primops >=0.6
+    , hashable >=1.2
+    , primitive >=0.5
 
   ghc-options: -Wall
 
@@ -38,8 +38,8 @@ test-suite map-properties
     , QuickCheck ==2.5.*
     , test-framework ==0.8.*
     , test-framework-quickcheck2 ==0.3.*
-    , containers ==0.5.*
-    , hashable ==1.2.*
+    , containers >=0.5
+    , hashable >=1.2
     , ctrie
 
 benchmark sequential
