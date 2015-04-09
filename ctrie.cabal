@@ -1,5 +1,5 @@
 name:                ctrie
-version:             0.1.0.2
+version:             0.2
 synopsis:            Non-blocking concurrent map
 description:
   A non-blocking concurrent map implementation based on
