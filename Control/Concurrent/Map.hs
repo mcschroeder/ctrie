@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE BangPatterns, PatternGuards, MagicHash #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 -----------------------------------------------------------------------
@@ -36,7 +37,9 @@ module Control.Concurrent.Map
     --, printMap
     ) where
 
+#if __GLASGOW_HASKELL__ < 710
 import Control.Applicative ((<$>))
+#endif
 import Control.Monad
 import Data.Atomics
 import Data.Bits
