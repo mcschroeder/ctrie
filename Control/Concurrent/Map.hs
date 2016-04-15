@@ -26,6 +26,7 @@ module Control.Concurrent.Map
       -- * Modification
     , insert
     , delete
+    , insertIfAbsent
 
       -- * Query
     , lookup
@@ -137,6 +138,52 @@ insert k v (Map root) = go0
                     unlessM (fst <$> casIORef inode ticket col') go0
 
 {-# INLINABLE insert #-}
+
+-- | /O(log n)/. Associate the given value with the given key.
+-- If the key is already present in the map, don't change the value.
+insertIfAbsent :: (Eq k, Hashable k) => k -> v -> Map k v -> IO ()
+insertIfAbsent k v (Map root) = go0
+    where
+        h = hash k
+        go0 = go 0 undefined root
+        go lev parent inode = do
+            ticket <- readForCAS inode
+            case peekTicket ticket of
+                CNode bmp arr -> do
+                    let m = mask h lev
+                        i = sparseIndex bmp m
+                        n = popCount bmp
+                    if bmp .&. m == 0
+                        then do
+                            let arr' = A.insert (SNode (S k v)) i n arr
+                                cn'  = CNode (bmp .|. m) arr'
+                            unlessM (fst <$> casIORef inode ticket cn') go0
+
+                        else case A.index arr i of
+                            SNode (S k2 v2)
+                                | k == k2 -> return ()
+
+                                | otherwise -> do
+                                    let h2 = hash k2
+                                    inode2 <- newINode h k v h2 k2 v2 (nextLevel lev)
+                                    let arr' = A.update (INode inode2) i n arr
+                                        cn'  = CNode bmp arr'
+                                    unlessM (fst <$> casIORef inode ticket cn') go0
+
+                            INode inode2 -> go (nextLevel lev) inode inode2
+
+                Tomb _ -> clean parent (prevLevel lev) >> go0
+
+                Collision arr -> 
+                    if any (\(S k2 _) -> k2 == k) arr
+                        then return ()
+                        else do
+                            let arr' = S k v : filter (\(S k2 _) -> k2 /= k) arr
+                                col' = Collision arr'
+                            unlessM (fst <$> casIORef inode ticket col') go0
+
+{-# INLINABLE insertIfAbsent #-}
+
 
 newINode :: Hash -> k -> v -> Hash -> k -> v -> Int -> IO (INode k v)
 newINode h1 k1 v1 h2 k2 v2 lev
