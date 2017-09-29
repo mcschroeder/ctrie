@@ -42,11 +42,11 @@ eq f g xs = monadicIO $ do
     assert $ a == b
 
 eq_ :: (Eq k, Eq v, Hashable k, Ord k)
-    => (Model k v -> Model k v) -> (CM.Map k v -> IO ()) -> [(k, v)] -> Property
+    => (Model k v -> Model k v) -> (CM.Map k v -> IO a) -> [(k, v)] -> Property
 eq_ f g xs = monadicIO $ do
     let a = M.toAscList $ f $ M.fromList xs
     m <- run $ CM.fromList xs
-    run $ g m
+    run $ void $ g m
     b <- run $ unsafeToAscList m
     assert $ a == b
 

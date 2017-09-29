@@ -75,7 +75,7 @@ main = do
 mkElems :: Int -> Int -> Int -> IO [[Int]]
 mkElems t o n = return $ [take o $ randomRs (0, n-1) (mkStdGen s) | s <- [1..t]]
 
-runOps :: (k -> IO ()) -> [[k]] -> IO ()
+runOps :: (k -> IO a) -> [[k]] -> IO ()
 runOps f elems = mapM_ wait =<< mapM (async . sequence_ . map f) elems
 
 -----------------------------------------------------------------------

@@ -96,7 +96,8 @@ empty = Map <$> newIORef (CNode 0 A.empty)
 
 -- | /O(log n)/. Associate the given value with the given key.
 -- If the key is already present in the map, the old value is replaced.
-insert :: (Eq k, Hashable k) => k -> v -> Map k v -> IO ()
+-- Returns 'True' if the value was inserted, 'False' if it was replaced.
+insert :: (Eq k, Hashable k) => k -> v -> Map k v -> IO Bool
 insert k v (Map root) = go0
     where
         h = hash k
@@ -112,21 +113,24 @@ insert k v (Map root) = go0
                         then do
                             let arr' = A.insert (SNode (S k v)) i n arr
                                 cn'  = CNode (bmp .|. m) arr'
-                            unlessM (fst <$> casIORef inode ticket cn') go0
+                            success <- fst <$> casIORef inode ticket cn'
+                            if success then return True else go0
 
                         else case A.index arr i of
                             SNode (S k2 v2)
                                 | k == k2 -> do
                                     let arr' = A.update (SNode (S k v)) i n arr
                                         cn'  = CNode bmp arr'
-                                    unlessM (fst <$> casIORef inode ticket cn') go0
+                                    success <- fst <$> casIORef inode ticket cn'
+                                    if success then return False else go0
 
                                 | otherwise -> do
                                     let h2 = hash k2
                                     inode2 <- newINode h k v h2 k2 v2 (nextLevel lev)
                                     let arr' = A.update (INode inode2) i n arr
                                         cn'  = CNode bmp arr'
-                                    unlessM (fst <$> casIORef inode ticket cn') go0
+                                    success <- fst <$> casIORef inode ticket cn'
+                                    if success then return False else go0
 
                             INode inode2 -> go (nextLevel lev) inode inode2
 
@@ -135,13 +139,18 @@ insert k v (Map root) = go0
                 Collision arr -> do
                     let arr' = S k v : filter (\(S k2 _) -> k2 /= k) arr
                         col' = Collision arr'
-                    unlessM (fst <$> casIORef inode ticket col') go0
+                    success <- fst <$> casIORef inode ticket col'
+                    if success
+                        then return $ not $ any (\(S k2 _) -> k2 == k) arr
+                        else go0
 
 {-# INLINABLE insert #-}
 
+
 -- | /O(log n)/. Associate the given value with the given key.
 -- If the key is already present in the map, don't change the value.
-insertIfAbsent :: (Eq k, Hashable k) => k -> v -> Map k v -> IO ()
+-- Returns 'True' if the value was inserted, 'False' otherwise.
+insertIfAbsent :: (Eq k, Hashable k) => k -> v -> Map k v -> IO Bool
 insertIfAbsent k v (Map root) = go0
     where
         h = hash k
@@ -157,30 +166,33 @@ insertIfAbsent k v (Map root) = go0
                         then do
                             let arr' = A.insert (SNode (S k v)) i n arr
                                 cn'  = CNode (bmp .|. m) arr'
-                            unlessM (fst <$> casIORef inode ticket cn') go0
+                            success <- fst <$> casIORef inode ticket cn'
+                            if success then return True else go0
 
                         else case A.index arr i of
                             SNode (S k2 v2)
-                                | k == k2 -> return ()
+                                | k == k2 -> return False
 
                                 | otherwise -> do
                                     let h2 = hash k2
                                     inode2 <- newINode h k v h2 k2 v2 (nextLevel lev)
                                     let arr' = A.update (INode inode2) i n arr
                                         cn'  = CNode bmp arr'
-                                    unlessM (fst <$> casIORef inode ticket cn') go0
+                                    success <- fst <$> casIORef inode ticket cn'
+                                    if success then return True else go0
 
                             INode inode2 -> go (nextLevel lev) inode inode2
 
                 Tomb _ -> clean parent (prevLevel lev) >> go0
 
-                Collision arr -> 
+                Collision arr ->
                     if any (\(S k2 _) -> k2 == k) arr
-                        then return ()
+                        then return False
                         else do
                             let arr' = S k v : filter (\(S k2 _) -> k2 /= k) arr
                                 col' = Collision arr'
-                            unlessM (fst <$> casIORef inode ticket col') go0
+                            success <- fst <$> casIORef inode ticket col'
+                            if success then return True else go0
 
 {-# INLINABLE insertIfAbsent #-}
 
@@ -201,7 +213,8 @@ newINode h1 k1 v1 h2 k2 v2 lev
 
 -- | /O(log n)/. Remove the given key and its associated value from the map,
 -- if present.
-delete :: (Eq k, Hashable k) => k -> Map k v -> IO ()
+-- Returns 'True' if the value was deleted, 'False' otherwise.
+delete :: (Eq k, Hashable k) => k -> Map k v -> IO Bool
 delete k (Map root) = go0
     where
         h = hash k
@@ -213,18 +226,20 @@ delete k (Map root) = go0
                     let m = mask h lev
                         i = sparseIndex bmp m
                     if bmp .&. m == 0
-                        then return ()  -- not found
+                        then return False  -- not found
                         else case A.index arr i of
                             SNode (S k2 _)
                                 | k == k2 -> do
                                     let arr' = A.delete i (popCount bmp) arr
                                         cn'  = CNode (bmp `xor` m) arr'
                                         cn'' = contract lev cn'
-                                    unlessM (fst <$> casIORef inode ticket cn'') go0
+                                    success <- fst <$> casIORef inode ticket cn''
+                                    result <- if success then return True else go0
                                     whenM (isTomb <$> readIORef inode) $
                                         cleanParent parent inode h (prevLevel lev)
+                                    return result
 
-                                | otherwise -> return ()  -- not found
+                                | otherwise -> return False  -- not found
 
                             INode inode2 -> go (nextLevel lev) inode inode2
 
@@ -234,7 +249,8 @@ delete k (Map root) = go0
                     let arr' = filter (\(S k2 _) -> k2 /= k) $ arr
                         col' | [s] <- arr' = Tomb s
                              | otherwise   = Collision arr'
-                    unlessM (fst <$> casIORef inode ticket col') go0
+                    success <- fst <$> casIORef inode ticket col'
+                    if success then return True else go0
 
 {-# INLINABLE delete #-}
 
